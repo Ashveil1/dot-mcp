@@ -1,80 +1,252 @@
-#!/bin/bash
-# expose.sh — one shot: server + tunnel, print URL for ChatGPT connector
-# usage: ./expose.sh                       (no auth)
-#        MCP_AUTH_TOKEN=xxx ./expose.sh    (with Bearer auth)
-set -u
+#!/usr/bin/env bash
+# Start dot-mcp and expose it through a tunnel.
+#
+# Default (stable random tunnl.gg URL; no provider account or key registration):
+#   ./expose.sh
+#
+# The SSH key and MCP token are generated once and stored in ~/.config/dot-mcp.
+#
+# Stable ngrok URL (one-time setup in your shell environment):
+#   export TUNNEL_PROVIDER=ngrok
+#   export NGROK_AUTHTOKEN='...'
+#   export NGROK_DOMAIN='your-assigned-domain.ngrok-free.app'
+#   export MCP_AUTH_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+#   ./expose.sh
+#
+# NGROK_DOMAIN must be the domain assigned to your ngrok account.
+set -Eeuo pipefail
 cd "$(dirname "$0")"
+
 PORT="${MCP_PORT:-8088}"
+PROVIDER="${TUNNEL_PROVIDER:-tunnl}"
+mkdir -p logs bin
 
-# 1. auth: ใช้ token ก็ต่อเมื่อส่ง MCP_AUTH_TOKEN มาทาง env เท่านั้น
-#    ไม่ส่ง = ไม่มี auth (สะดวก แต่ใครได้ URL ก็สั่งเครื่องได้)
-if [ -n "${MCP_AUTH_TOKEN:-}" ]; then
-  AUTH_HDR=(-H "Authorization: Bearer $MCP_AUTH_TOKEN")
-  AUTH_LINE="Bearer $MCP_AUTH_TOKEN"
-else
-  AUTH_HDR=()
-  AUTH_LINE="none (เปิดโล่ง ใครมี URL ใช้ได้)"
+if [[ "$PROVIDER" != "tunnl" && "$PROVIDER" != "cloudflare" && "$PROVIDER" != "ngrok" && "$PROVIDER" != "serveo" ]]; then
+  echo "Unsupported TUNNEL_PROVIDER='$PROVIDER'. Use tunnl, cloudflare, ngrok, or serveo." >&2
+  exit 2
 fi
 
-# 2. server (เริ่มใหม่แบบไม่มี token ยกเว้นส่ง MCP_AUTH_TOKEN มาทาง env)
-ok=$(curl -s --max-time 3 http://127.0.0.1:$PORT/health || true)
-if ! echo "$ok" | grep -q '"tools"'; then
-  pkill -f "[d]ot_mcp\.py" 2>/dev/null; sleep 2
-  if [ -n "${MCP_AUTH_TOKEN:-}" ]; then
-    MCP_PORT=$PORT nohup .venv/bin/python dot_mcp.py > mcp.log 2>&1 &
-  else
-    MCP_PORT=$PORT env -u MCP_AUTH_TOKEN nohup .venv/bin/python dot_mcp.py > mcp.log 2>&1 &
+if [[ "$PROVIDER" == "tunnl" || "$PROVIDER" == "serveo" ]]; then
+  command -v ssh >/dev/null 2>&1 || { echo "ssh client not found; install OpenSSH client first." >&2; exit 1; }
+fi
+
+if [[ "$PROVIDER" == "ngrok" ]]; then
+  if [[ -z "${NGROK_AUTHTOKEN:-}" ]]; then
+    echo "Missing NGROK_AUTHTOKEN. Create an ngrok account and set its auth token first." >&2
+    exit 2
   fi
-  sleep 6
-fi
-curl -s --max-time 5 http://127.0.0.1:$PORT/health || { echo "server failed"; tail -10 mcp.log; exit 1; }
-echo
-
-# 3. cloudflared binary
-CF=./bin/cloudflared
-if [ ! -x "$CF" ]; then
-  mkdir -p bin
-  curl -fsSL -o "$CF" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64
-  chmod +x "$CF"
+  if [[ -z "${NGROK_DOMAIN:-}" ]]; then
+    echo "Missing NGROK_DOMAIN. Set it to the static dev domain assigned in your ngrok dashboard." >&2
+    exit 2
+  fi
+  if [[ ! "$NGROK_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+    echo "Invalid NGROK_DOMAIN. Pass only the hostname, without https:// or a path." >&2
+    exit 2
+  fi
 fi
 
-# 4. tunnel (restart fresh)
-pkill -f "[c]loudflared tunnel" 2>/dev/null; sleep 1
-rm -f tunnel.log
-nohup "$CF" tunnel --url http://127.0.0.1:$PORT > tunnel.log 2>&1 &
-URL=""
-for i in $(seq 1 45); do
-  URL=$(grep -oE "https://[A-Za-z0-9-]+\.trycloudflare\.com" tunnel.log 2>/dev/null | head -1)
-  [ -n "$URL" ] && break
-  sleep 2
-done
-[ -z "$URL" ] && { echo "tunnel failed"; tail -20 tunnel.log; exit 1; }
-HOST_ONLY=$(echo "$URL" | sed 's#https://##')
+# Ensure Python environment exists.
+if [[ ! -x .venv/bin/python ]]; then
+  echo "Python environment not found; run ./setup.sh first." >&2
+  exit 1
+fi
 
-# 5. restart server whitelisting tunnel host (MCP DNS rebinding protection)
+# Persist credentials locally so the URL and connector token survive reruns.
+STATE_DIR="${DOT_MCP_STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/dot-mcp}"
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
+if [[ -z "${MCP_AUTH_TOKEN:-}" ]]; then
+  if [[ -s "$STATE_DIR/auth_token" ]]; then
+    MCP_AUTH_TOKEN="$(cat "$STATE_DIR/auth_token")"
+  else
+    MCP_AUTH_TOKEN="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    (umask 077; printf '%s\n' "$MCP_AUTH_TOKEN" > "$STATE_DIR/auth_token")
+    echo "Generated and saved persistent MCP token at $STATE_DIR/auth_token"
+  fi
+fi
+export MCP_AUTH_TOKEN
+export MCP_PORT="$PORT"
+
+# Start local MCP server if it is not already healthy.
+health="$(curl -fsS --max-time 3 "http://127.0.0.1:$PORT/health" 2>/dev/null || true)"
+if ! grep -q '"tools"' <<<"$health"; then
+  pkill -f '[d]ot_mcp\.py' 2>/dev/null || true
+  sleep 1
+  nohup .venv/bin/python dot_mcp.py > mcp.log 2>&1 &
+  for _ in $(seq 1 20); do
+    health="$(curl -fsS --max-time 2 "http://127.0.0.1:$PORT/health" 2>/dev/null || true)"
+    grep -q '"tools"' <<<"$health" && break
+    sleep 1
+  done
+fi
+if ! grep -q '"tools"' <<<"$health"; then
+  echo "MCP server failed to start. Recent log:" >&2
+  tail -30 mcp.log 2>/dev/null || true
+  exit 1
+fi
+
+# Start selected tunnel.
+if [[ "$PROVIDER" == "ngrok" ]]; then
+  if command -v ngrok >/dev/null 2>&1; then
+    NGROK_BIN="$(command -v ngrok)"
+  elif [[ -x ./bin/ngrok ]]; then
+    NGROK_BIN="./bin/ngrok"
+  else
+    echo "ngrok binary not found. Install ngrok for this OS/architecture and retry." >&2
+    echo "On Android/Termux, a Linux ngrok binary may not run directly; check compatibility." >&2
+    exit 1
+  fi
+  pkill -f '[n]grok http' 2>/dev/null || true
+  nohup "$NGROK_BIN" http "http://127.0.0.1:$PORT" --url="$NGROK_DOMAIN" --authtoken="$NGROK_AUTHTOKEN" > tunnel.log 2>&1 &
+  URL="https://$NGROK_DOMAIN"
+  for _ in $(seq 1 30); do
+    if curl -fsS --max-time 2 "$URL/health" >/dev/null 2>&1; then break; fi
+    sleep 2
+  done
+elif [[ "$PROVIDER" == "tunnl" ]]; then
+  # tunnl.gg assigns a stable random hostname based on this SSH key. No
+  # provider account or key registration is required. Free tunnels expire
+  # after 24h or 2h idle, so reconnect with the same key when needed.
+  KEY_DIR="$STATE_DIR/ssh"
+  KEY_FILE="$KEY_DIR/id_ed25519"
+  mkdir -p "$KEY_DIR"
+  chmod 700 "$KEY_DIR"
+  if [[ ! -s "$KEY_FILE" || ! -s "$KEY_FILE.pub" ]]; then
+    command -v ssh-keygen >/dev/null 2>&1 || { echo "ssh-keygen not found; install OpenSSH client." >&2; exit 1; }
+    if [[ -e "$KEY_FILE" || -e "$KEY_FILE.pub" ]]; then
+      echo "Incomplete SSH key pair at $KEY_FILE; refusing to overwrite it. Back it up or remove both files and retry." >&2
+      exit 1
+    fi
+    ssh-keygen -q -t ed25519 -N '' -f "$KEY_FILE" -C dot-mcp-tunnl
+    chmod 600 "$KEY_FILE"
+    chmod 644 "$KEY_FILE.pub"
+    echo "Created persistent tunnl.gg SSH key at $KEY_FILE"
+  fi
+  if [[ -s logs/tunnl.pid ]]; then
+    OLD_PID="$(cat logs/tunnl.pid)"
+    if [[ "$OLD_PID" =~ ^[0-9]+$ ]] && kill -0 "$OLD_PID" 2>/dev/null; then kill "$OLD_PID" 2>/dev/null || true; fi
+  fi
+  : > tunnel.log
+  nohup ssh -tt -i "$KEY_FILE" -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o ServerAliveInterval=20 \
+    -o ServerAliveCountMax=3 \
+    -R "80:127.0.0.1:$PORT" stable@proxy.tunnl.gg \
+    > tunnel.log 2>&1 </dev/null &
+  TUNNEL_PID=$!
+  echo "$TUNNEL_PID" > logs/tunnl.pid
+  URL=""
+  for _ in $(seq 1 35); do
+    if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+      echo "tunnl.gg SSH tunnel exited unexpectedly. Recent log:" >&2
+      tail -40 tunnel.log >&2 || true
+      exit 1
+    fi
+    URL="$(grep -oE 'https://[a-z-]+-[a-f0-9]+\.tunnl\.gg' tunnel.log 2>/dev/null | head -1 || true)"
+    [[ -n "$URL" ]] && break
+    sleep 1
+  done
+  if [[ -z "$URL" ]]; then
+    echo "Could not read the stable tunnl.gg URL from tunnel output. Recent log:" >&2
+    tail -40 tunnel.log >&2 || true
+    exit 1
+  fi
+elif [[ "$PROVIDER" == "serveo" ]]; then
+  # Random, readable hostname; Serveo may reject a collision, so verify the
+  # actual MCP endpoint before displaying it as ready.
+  SERVEO_SUBDOMAIN="$(.venv/bin/python -c 'import secrets; print("dot-mcp-" + secrets.token_hex(5))')"
+  URL="https://$SERVEO_SUBDOMAIN.serveo.net"
+  : > tunnel.log
+  nohup ssh -N -T \
+    -o StrictHostKeyChecking=accept-new \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -R "$SERVEO_SUBDOMAIN:80:127.0.0.1:$PORT" serveo.net \
+    > tunnel.log 2>&1 &
+  TUNNEL_PID=$!
+  echo "$TUNNEL_PID" > logs/serveo.pid
+  # Wait for DNS/HTTPS to come up. Final MCP initialize below is authoritative.
+  for _ in $(seq 1 30); do
+    if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+      echo "Serveo SSH tunnel exited unexpectedly. Recent log:" >&2
+      tail -30 tunnel.log >&2 || true
+      exit 1
+    fi
+    if curl -fsS --max-time 3 "$URL/health" >/dev/null 2>&1; then break; fi
+    sleep 2
+  done
+else
+  CF=./bin/cloudflared
+  if [[ ! -x "$CF" ]]; then
+    mkdir -p bin
+    case "$(uname -m)" in
+      aarch64|arm64) CF_ASSET="cloudflared-linux-arm64" ;;
+      x86_64|amd64) CF_ASSET="cloudflared-linux-amd64" ;;
+      *)
+        echo "Unsupported architecture for automatic cloudflared download: $(uname -m)" >&2
+        exit 1
+        ;;
+    esac
+    if ! curl -fsSL -o "$CF" "https://github.com/cloudflare/cloudflared/releases/latest/download/$CF_ASSET"; then
+      echo "Could not download cloudflared. Install it manually and put it at $CF." >&2
+      exit 1
+    fi
+    chmod +x "$CF"
+  fi
+  pkill -f '[c]loudflared tunnel' 2>/dev/null || true
+  nohup "$CF" tunnel --url "http://127.0.0.1:$PORT" > tunnel.log 2>&1 &
+  URL=""
+  for _ in $(seq 1 45); do
+    URL="$(grep -oE 'https://[A-Za-z0-9-]+\.trycloudflare\.com' tunnel.log 2>/dev/null | head -1 || true)"
+    [[ -n "$URL" ]] && break
+    sleep 2
+  done
+  if [[ -z "$URL" ]]; then
+    echo "Cloudflare Quick Tunnel failed. Recent log:" >&2
+    tail -30 tunnel.log >&2 || true
+    exit 1
+  fi
+fi
+
+HOST_ONLY="${URL#https://}"
 export MCP_PUBLIC_HOST="$HOST_ONLY"
-pkill -f "[d]ot_mcp\.py" 2>/dev/null; sleep 2
-if [ -n "${MCP_AUTH_TOKEN:-}" ]; then
-  MCP_PORT=$PORT nohup .venv/bin/python dot_mcp.py > mcp.log 2>&1 &
-else
-  MCP_PORT=$PORT env -u MCP_AUTH_TOKEN nohup .venv/bin/python dot_mcp.py > mcp.log 2>&1 &
-fi
-sleep 6
-CODE=$(curl -s --max-time 15 -o /dev/null -w "%{http_code}" -X POST "$URL/mcp" \
-  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-  "${AUTH_HDR[@]}" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')
-[ "$CODE" != "200" ] && { echo "public MCP check failed (http $CODE)"; tail -5 mcp.log; exit 1; }
+# Restart server so DNS-rebinding protection allows the public tunnel hostname.
+pkill -f '[d]ot_mcp\.py' 2>/dev/null || true
+sleep 1
+nohup .venv/bin/python dot_mcp.py > mcp.log 2>&1 &
+sleep 3
 
-echo "================ COPY TO CHATGPT ================"
-echo "URL:    $URL/mcp"
-echo "Auth:   $AUTH_LINE"
-echo "Health: $URL/health"
-echo "================================================="
-echo "ChatGPT web > Settings > Apps > Advanced > Developer Mode ON"
-if [ -n "${MCP_AUTH_TOKEN:-}" ]; then
-  echo "> Add custom connector > paste URL + Bearer token"
-else
-  echo "> Add custom connector > paste URL + auth none"
-  echo "!! ปิด tunnel ทันทีเมื่อเลิกใช้: pkill -f '[c]loudflared tunnel'"
+# Verify the public endpoint using MCP initialize, not only /health.
+CODE="$(curl -sS --max-time 15 -o /tmp/dot-mcp-initialize.out -w '%{http_code}' -X POST "$URL/mcp" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"dot-mcp-check","version":"1"}}}' || true)"
+if [[ "$CODE" != "200" ]] || ! grep -q '"jsonrpc"' /tmp/dot-mcp-initialize.out; then
+  echo "Public MCP initialize check failed (HTTP $CODE); endpoint may be unavailable or blocked by a tunnel interstitial." >&2
+  tail -30 mcp.log >&2 || true
+  [[ "$PROVIDER" == "ngrok" || "$PROVIDER" == "serveo" ]] && tail -20 tunnel.log >&2 || true
+  head -c 600 /tmp/dot-mcp-initialize.out >&2 || true
+  echo >&2
+  exit 1
 fi
+
+echo
+echo "============== COPY TO CHATGPT =============="
+echo "MCP URL: $URL/mcp"
+echo "Auth:    Bearer token required"
+echo "Token:   $MCP_AUTH_TOKEN"
+echo "Health:  $URL/health"
+if [[ "$PROVIDER" == "tunnl" ]]; then
+  echo "Note: URL is tied to the saved SSH key and stays the same on reconnect. Free tunnel expires after 24h or 2h idle."
+  echo "Persistent state: $STATE_DIR (keep it safe; it contains the SSH private key and MCP token)."
+elif [[ "$PROVIDER" == "cloudflare" ]]; then
+  echo "Note: Cloudflare Quick Tunnel URL is temporary and may change next run."
+elif [[ "$PROVIDER" == "ngrok" ]]; then
+  echo "Note: ngrok URL remains the same while you keep using this assigned domain."
+else
+  echo "Note: Serveo hostname is random for this run; the next run generates another one."
+fi
+echo "============================================="
+echo "Keep this process running while using the connector."

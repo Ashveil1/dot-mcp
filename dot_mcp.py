@@ -201,15 +201,19 @@ def _pack_session(sid: str, stream: str, offset: int, length: int) -> dict:
             "next_offset": offset + len(chunk), "total_bytes": total,
             "done": s["done"], "exit_code": s["code"], "text": text}
 
-# ---- MCP server (v2 MCPServer, fallback v1 FastMCP) ----
+# ---- MCP server (v2 MCPServer + MCP Apps, fallback v1 FastMCP) ----
+_APPS = None
 try:
     from mcp.server.mcpserver import MCPServer as _Server
+    from mcp.server.apps import Apps as _Apps
+    _APPS = _Apps()
     _V2 = True
+    srv = _Server("dot-agent", extensions=[_APPS])
 except Exception:
     from mcp.server.fastmcp import FastMCP as _Server  # type: ignore
     _V2 = False
+    srv = _Server("dot-agent")
 
-srv = _Server("dot-agent")
 instructions = ("Persistent Termux agent (dot-like): shell + files + memory + goals + tasks. "
     "Relative paths resolve from $HOME. Use memory tools to keep context across chats.")
 try: srv.instructions = instructions
@@ -466,6 +470,45 @@ def _check_auth(scope, receive, send):
         inner = _inner_app
         await inner(s, r, se)
     return app
+
+# ---- Optional Codex-inspired embedded workspace UI (MCP Apps / v2 SDK) ----
+def _open_workspace() -> str:
+    state = load_json(STATE_FILE, {})
+    memory = load_json(MEM_FILE, [])
+    inbox = load_json(INBOX_FILE, [])
+    rules = load_json(RULES_FILE, [])
+    schedules = load_json(SCHED_FILE, [])
+    with SESSIONS_LOCK:
+        sessions = [{"session_id": sid, "command": v.get("command", ""),
+                     "done": bool(v.get("done")), "exit_code": v.get("code")}
+                    for sid, v in SESSIONS.items()]
+    tasks = state.get("tasks", [])
+    snapshot = {
+        "home": str(HOME), "data_dir": str(DATA_DIR),
+        "goal": state.get("goal", ""),
+        "updates": state.get("updates", [])[-8:],
+        "tasks": tasks[-50:], "open_tasks": sum(1 for t in tasks if not t.get("done")),
+        "memory": memory[-30:], "memory_count": len(memory),
+        "unread_inbox": sum(1 for m in inbox if not m.get("acked")),
+        "sessions": sessions[-20:], "active_sessions": sum(1 for x in sessions if not x["done"]),
+        "rules": rules, "schedules": schedules,
+    }
+    return json.dumps({"workspace": snapshot}, ensure_ascii=False)
+
+if _APPS is not None:
+    _UI_URI = "ui://dot-agent/workspace.html"
+    _APPS.tool(resource_uri=_UI_URI, name="open_workspace", title="Open Dots Workspace",
+               description="Open a Codex-inspired dashboard for Dots tasks, memory, sessions, schedules and safety rules.")(_open_workspace)
+    _APPS.add_html_resource(_UI_URI, (Path(__file__).resolve().parent / "ui" / "workspace.html").read_text(encoding="utf-8"), title="Dots Workspace")
+    # The server was created before this module's tools were declared, so attach the app contributions explicitly.
+    srv.add_tool(_open_workspace, name="open_workspace", title="Open Dots Workspace",
+                 description="Open a Codex-inspired dashboard for Dots tasks, memory, sessions, schedules and safety rules.",
+                 meta={"ui": {"resourceUri": _UI_URI}})
+    for _resource_binding in _APPS.resources():
+        srv.add_resource(_resource_binding.resource)
+else:
+    # Older MCP SDKs retain a text-only fallback; no host UI capability is assumed.
+    srv.tool()(_open_workspace)
 
 if __name__ == "__main__":
     import sys
