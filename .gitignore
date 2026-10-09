@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Logs
+*.log
+mcp.log
+tunnel.log
+nohup.out
+
+# Downloaded binaries (auto-fetched by expose.sh)
+bin/cloudflared
+
+# Local data (server state, not source)
+.dot-mcp/
+*.tmp
