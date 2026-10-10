@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""dots — pretty CLI for dot-mcp: `dots start`, `dots status`, `dots stop`.
+
+Defaults for everything (port 33041, ~/.dot-mcp); override with flags.
+"""
+from __future__ import annotations
+import argparse, json, os, secrets, subprocess, sys
+from pathlib import Path
+
+import dots_ui as ui
+
+REPO = Path(__file__).resolve().parent
+STATE_DIR = Path(os.environ.get("DOT_MCP_STATE_DIR",
+                 os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) ) / "dot-mcp"
+SECRET_FILE = STATE_DIR / "owner_secret"
+DEFAULT_PORT = 33041
+DEFAULT_DATA = str(Path.home() / ".dot-mcp")
+
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich import box
+    console = Console()
+    HAS_RICH = True
+except Exception:  # plain fallback
+    HAS_RICH = False
+    class _C:
+        def print(self, *a, **k):
+            print(*[str(x).replace("[", "").replace("]", "") for x in a])
+    console = _C()  # type: ignore
+    Panel = Table = None  # type: ignore
+
+ACCENT = "cyan"
+WARN = "yellow"
+ERR = "red"
+OK = "green"
+
+
+def banner(sub: str = "") -> None:
+    title = "[bold cyan]dots[/] [dim]personal MCP agent[/]"
+    if sub:
+        title += f"  [bold white]{sub}[/]"
+    if HAS_RICH:
+        console.print(Panel(title, box=box.ROUNDED, border_style=ACCENT))
+    else:
+        console.print(f"== dots {sub} ==")
+
+
+def get_secret() -> str:
+    """Per-machine owner secret: read from disk, else generate + save (0600)."""
+    try:
+        s = SECRET_FILE.read_text(encoding="utf-8").strip()
+        if s:
+            return s
+    except Exception:
+        pass
+    s = secrets.token_urlsafe(32)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(STATE_DIR, 0o700)
+    tmp = SECRET_FILE.with_suffix(".tmp")
+    tmp.write_text(s + "\n", encoding="utf-8")
+    os.replace(tmp, SECRET_FILE)
+    os.chmod(SECRET_FILE, 0o600)
+    return s
+
+
+def server_python() -> str:
+    venv = REPO / ".venv" / "bin" / "python"
+    if venv.is_file() and os.access(venv, os.X_OK):
+        return str(venv)
+    return sys.executable
+
+
+def _start_oauth_client(data_dir: str) -> dict:
+    """Read the pre-provisioned OAuth client the server writes at boot."""
+    try:
+        st = json.loads((Path(data_dir) / "oauth.json").read_text(encoding="utf-8"))
+        sc = st.get("static_client")
+        if isinstance(sc, dict) and sc.get("client_id"):
+            return sc
+    except Exception:
+        pass
+    return {}
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    port = args.port or DEFAULT_PORT
+    data_dir = args.data_dir or DEFAULT_DATA
+    # Owner secret: stable per machine (env wins, else file, else generate+save).
+    secret = (os.environ.get("MCP_PATH_SECRET", "").strip() or get_secret())
+    py = server_python()
+    env = dict(os.environ, MCP_PORT=str(port), MCP_HOST="127.0.0.1",
+               DOT_MCP_DATA=data_dir, MCP_PATH_SECRET=secret)
+    try:
+        v = subprocess.run([py, "-c", "import mcp; print('mcp-ok')"],
+                           capture_output=True, text=True, timeout=30).stdout.strip()
+        assert "mcp-ok" in v
+    except Exception:
+        print(f"no mcp package in {py} — run ./setup.sh first", file=sys.stderr)
+        return 1
+    ctx = ui.StartCtx(port=port, data_dir=data_dir, secret=secret, py=py,
+                      env=env, repo=REPO)
+
+    if args.json:
+        # script mode: full flow, JSON ONLY to stdout, server left running
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            res = ui.plain_flow(ctx, STATE_DIR, console, leave_running=True)
+        oauth = _start_oauth_client(data_dir)
+        sys.stdout.write(ui.json_result(res.ok, ctx, res, oauth) + "\n")
+        return 0 if res.ok else 1
+
+    banner("start")
+    if ui.port_in_use(port):
+        console.print(f"[{ERR}]port {port} is already in use — run dots status or dots stop first[/]")
+        return 1
+
+    # Run the full flow quietly (no spinner, no live output) — then show results once.
+    # leave_running=True: the verified server stays up as a detached background
+    # process, so we can return to the shell instead of blocking it.
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        res = ui.plain_flow(ctx, STATE_DIR, console, leave_running=True)
+    if not res.ok:
+        return 1
+
+    # Show all info in one shot
+    host = res.host
+    public_mcp = res.public_url
+    oauth = _start_oauth_client(data_dir)
+    t = Table("", "", box=box.SIMPLE, show_header=False)
+    t.add_row("Public URL", public_mcp)
+    t.add_row("Owner secret", secret)
+    t.add_row("OAuth Client ID", oauth.get("client_id", "—"))
+    t.add_row("OAuth Client secret", oauth.get("client_secret", "—"))
+    console.print(t)
+    console.print(Panel(
+        f"[bold green]Running.[/] Paste the public URL into your connector (auth = OAuth).",
+        title="ready", border_style=OK))
+    console.print("[dim]Server running in the background — dots status / dots stop[/]\n")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    port = args.port or DEFAULT_PORT
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as r:
+            info = json.loads(r.read().decode())
+        console.print(f"[{OK}]● running[/] port {port} · tools {info.get('tools')} · home {info.get('home')}")
+        return 0
+    except Exception:
+        console.print(f"[{ERR}]○ stopped[/] port {port} (no server)")
+        return 1
+
+
+def cmd_stop(_: argparse.Namespace) -> int:
+    import signal as _sig
+    killed = 0
+    try:
+        out = subprocess.run(["pgrep", "-f", "dot_mcp\\.py"], capture_output=True, text=True).stdout
+        for pid in out.split():
+            try:
+                os.kill(int(pid), _sig.SIGTERM)
+                killed += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    pidfile = REPO / "logs" / "tunnl.pid"
+    try:
+        if pidfile.is_file():
+            os.kill(int(pidfile.read_text().strip()), _sig.SIGTERM)
+            pidfile.unlink()
+            console.print("Tunnel stopped.")
+    except Exception:
+        pass
+    console.print(f"Stopped {killed} server(s). " if killed else "No server running.")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="dots", description="dot-mcp personal agent CLI")
+    sub = ap.add_subparsers(dest="cmd")
+    p = sub.add_parser("start", help="run MCP server + tunnel")
+    p.add_argument("--port", type=int, default=0, help="override port (default 33041)")
+    p.add_argument("--data-dir", default="", help="override data dir (default ~/.dot-mcp)")
+    p.add_argument("--json", action="store_true", help="script mode: JSON result, server left running")
+    q = sub.add_parser("status", help="check if the server is running")
+    q.add_argument("--port", type=int, default=0, help="override port (default 33041)")
+    sub.add_parser("stop", help="stop server + tunnel")
+    args = ap.parse_args(argv)
+    if args.cmd == "start":
+        return cmd_start(args)
+    if args.cmd == "status":
+        return cmd_status(args)
+    if args.cmd == "stop":
+        return cmd_stop(args)
+    banner()
+    console.print("Commands: [bold]start[/] · [bold]status[/] · [bold]stop[/]\nExample: [cyan]./dots start[/]")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

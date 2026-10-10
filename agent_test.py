@@ -1,13 +1,31 @@
 #!/usr/bin/env python3
 """Quick client test: list tools + call list_dir, get_state, remember/recall."""
-import asyncio, json, sys
+import asyncio, json, os, sys
 from mcp.client.streamable_http import streamable_http_client
 from mcp.client.session import ClientSession
 
-URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8088/mcp"
+URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:33041/mcp/"
+
+def _secret() -> str:
+    if os.environ.get("MCP_PATH_SECRET", "").strip():
+        return os.environ["MCP_PATH_SECRET"].strip()
+    base = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")))
+    for name in ("owner_secret", "path_secret"):  # latter is legacy
+        try:
+            return open(os.path.join(base, "dot-mcp", name), encoding="utf-8").read().strip()
+        except Exception:
+            pass
+    return ""
 
 async def main():
-    async with streamable_http_client(URL) as (rs, ws):
+    try:
+        import httpx
+    except ImportError:
+        import httpx2 as httpx  # .venv/LiteLLM-era rename
+    sec = _secret()
+    client = httpx.AsyncClient(headers={"Authorization": f"Bearer {sec}"}) if sec else None
+    async with streamable_http_client(URL, http_client=client) as streams:
+        rs, ws = streams[0], streams[1]
         async with ClientSession(rs, ws) as s:
             await s.initialize()
             tools = await s.list_tools()

@@ -11,6 +11,7 @@ venv/
 mcp.log
 tunnel.log
 nohup.out
+logs/
 
 # Downloaded binaries (auto-fetched by expose.sh)
 bin/cloudflared

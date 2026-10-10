@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Local-only dot agent: ChatGPT model (API key) + MCP server on this machine.
-No tunnel, no sub needed. Server: http://127.0.0.1:8088/mcp
+No tunnel, no sub needed. Server: http://127.0.0.1:33041/mcp
 
   export OPENAI_API_KEY=sk-...
   .venv/bin/python local_agent.py            # chat loop
@@ -10,24 +10,43 @@ No tunnel, no sub needed. Server: http://127.0.0.1:8088/mcp
 from __future__ import annotations
 import asyncio, json, os, sys
 
-MCP_URL = os.environ.get("MCP_URL", "http://127.0.0.1:8088/mcp")
+MCP_URL = os.environ.get("MCP_URL", "http://127.0.0.1:33041/mcp/")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-MCP_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "")
+
+def _owner_secret() -> str:
+    if os.environ.get("MCP_PATH_SECRET", "").strip():
+        return os.environ["MCP_PATH_SECRET"].strip()
+    base = os.environ.get("DOT_MCP_STATE_DIR", "") or os.path.join(
+        os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")))
+    for name in ("owner_secret", "path_secret"):  # latter is legacy
+        try:
+            s = open(os.path.join(base, "dot-mcp", name), encoding="utf-8").read().strip()
+            if s:
+                return s
+        except Exception:
+            pass
+    return ""
 
 def _http_client():
-    if not MCP_TOKEN: return None
-    import httpx
-    return httpx.AsyncClient(headers={"Authorization": f"Bearer {MCP_TOKEN}"})
+    try:
+        import httpx
+    except ImportError:
+        import httpx2 as httpx  # .venv/LiteLLM-era rename
+    sec = _owner_secret()
+    if not sec: return None
+    # NOTE: no custom User-Agent — httpx2 in .venv duplicates it and the v2 server rejects the request.
+    return httpx.AsyncClient(headers={"Authorization": f"Bearer {sec}"})
 SYSTEM = ("You are the user's dot on their own machine. "
   "At start call get_state, poll_inbox, recall. "
   "Save important facts with remember, progress with add_update, "
-  "visible results with notify_user. Risky commands: request_approval first. "
+  "visible results with notify_user. "
   "Relative paths resolve from $HOME.")
 
 async def mcp_tools():
     from mcp.client.streamable_http import streamable_http_client
     from mcp.client.session import ClientSession
-    async with streamable_http_client(MCP_URL, http_client=_http_client()) as (rs, ws):
+    async with streamable_http_client(MCP_URL, http_client=_http_client()) as streams:
+        rs, ws = streams[0], streams[1]
         async with ClientSession(rs, ws) as s:
             await s.initialize()
             t = await s.list_tools()
@@ -51,7 +70,8 @@ async def main():
         for d in defs]
     from mcp.client.streamable_http import streamable_http_client
     from mcp.client.session import ClientSession
-    async with streamable_http_client(MCP_URL, http_client=_http_client()) as (rs, ws):
+    async with streamable_http_client(MCP_URL, http_client=_http_client()) as streams:
+        rs, ws = streams[0], streams[1]
         async with ClientSession(rs, ws) as s:
             await s.initialize()
             msgs = [{"role": "system", "content": SYSTEM}]

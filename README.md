@@ -1,8 +1,10 @@
 # dot-mcp
 
-Single-file MCP agent แบบ dots สำหรับ Termux / Linux — shell + files + memory + goals + inbox + approvals + rules + scheduler ในไฟล์เดียว (`dot_mcp.py`)
+Single-file MCP agent แบบ dots สำหรับ Termux / Linux — shell + files + memory + goals + inbox + scheduler ในไฟล์เดียว (`dot_mcp.py`)
 
-Endpoint: `http://127.0.0.1:8088/mcp` · Health: `/health`
+> ⚠️ URL สะอาด (`/mcp/`) — auth เป็น Bearer 2 แบบ: JWT จาก OAuth (ให้ ChatGPT/Claude/Gemini) หรือ secret เดิมใน header (ให้สคริปต์ local) ไม่มี header = 401 แม้ localhost
+
+Endpoint: `http://127.0.0.1:33041/mcp/` · Health: `/health`
 
 ## Features
 
@@ -11,19 +13,18 @@ Endpoint: `http://127.0.0.1:8088/mcp` · Health: `/health`
 - **Memory:** `remember`, `recall`, `forget` — จำข้ามแชท (`~/.dot-mcp/memory.json`)
 - **Goals/Tasks:** `set_goal`, `add_update`, `get_state`, `add_task`, `complete_task`
 - **Inbox (ข้ามแชท):** `notify_user`, `poll_inbox`, `ack_inbox`
-- **Approvals + Rules:** `request_approval`, `answer_approval`, `add_rule`, `list_rules`, `remove_rule` — บังคับฝั่ง server (`ask`/`block` ด้วย regex)
 - **Scheduler:** `add_schedule`, `list_schedules`, `remove_schedule` — งานประจำรันเองตอนไม่มีแชท ผลเข้า inbox
-- **Embedded UI:** `open_workspace` — MCP Apps dashboard สไตล์ Codex แสดง tasks, memory, command sessions, schedules และ safety rules
-- **Auth:** Bearer (`MCP_AUTH_TOKEN`) + DNS rebinding protection (loopback + `MCP_PUBLIC_HOST`)
-- รวม 27 tools เมื่อใช้ MCP SDK v2; SDK v1 ใช้ fallback แบบข้อความ
+- **Embedded UI:** `open_workspace` — MCP Apps dashboard สไตล์ Codex แสดง tasks, memory, command sessions และ schedules
+- รวม 22 tools
 
 ## Quickstart
 
 ```bash
-./setup.sh   # สร้าง .venv + ติดตั้ง mcp, uvicorn
-./run.sh     # เช็ค tools + รันที่ :8088
-./test.sh    # curl /health + initialize
+./dots start   # server + tunnel tunnl + public URL (port 33041, secret ประจำเครื่อง)
+./dots status  # เช็ค · ./dots stop = หยุด
 ```
+
+สำรองแบบเดิม: `./setup.sh` + `./run.sh` + `./test.sh` + `./expose.sh` ยังใช้ได้
 
 คุยแบบ local-only (ไม่ต้อง tunnel, ไม่ต้องจ่าย sub):
 
@@ -37,7 +38,7 @@ export OPENAI_API_KEY=sk-...
 
 ```bash
 .venv/bin/python agent_test.py
-.venv/bin/python agent_test.py http://127.0.0.1:8088/mcp
+.venv/bin/python agent_test.py http://127.0.0.1:33041/mcp/   # อ่าน secret จาก env/ไฟล์ให้เอง
 ```
 
 เปิดให้ ChatGPT web เรียกผ่าน tunnel:
@@ -51,9 +52,9 @@ cd dot-mcp
 ./expose.sh
 ```
 
-ครั้งแรกสคริปต์จะสร้าง SSH key และ MCP bearer token ให้อัตโนมัติ เก็บไว้ใน `~/.config/dot-mcp/` แล้วแสดง URL `/mcp` และ token สำหรับตั้งค่า connector การรันครั้งต่อไปจะใช้ key และ token เดิม จึงไม่ต้องเปลี่ยน URL หรือแก้ connector ตราบใดที่ยังเก็บโฟลเดอร์นี้ไว้
+ครั้งแรกสคริปต์จะสร้าง SSH key และ owner secret ให้อัตโนมัติ เก็บไว้ใน `~/.config/dot-mcp/` (`owner_secret` 0600) แล้วแสดง URL `/mcp/` เส้นสะอาดสำหรับตั้งค่า connector (auth = OAuth) การรันครั้งต่อไปใช้ key และ secret เดิม URL และ consent ไม่เปลี่ยน ตราบใดที่ยังเก็บโฟลเดอร์นี้ไว้
 
-ข้อจำกัดแผนฟรีของ tunnl.gg: URL เป็นชื่อสุ่มที่ผู้ให้บริการกำหนด (ไม่สามารถเลือก prefix `dot-mcp-` เองได้); tunnel หมดอายุหลัง 24 ชั่วโมง หรือหลังไม่มี traffic 2 ชั่วโมง ต้องรัน `./expose.sh` ใหม่เพื่อเชื่อมต่ออีกครั้ง แต่ URL จะคงเดิมเมื่อใช้ SSH key เดิม ต้องมี OpenSSH (`ssh` และ `ssh-keygen`) และเครื่องต้องออนไลน์ขณะใช้ MCP อย่าลบหรือเผยแพร่ private key และไฟล์ `auth_token` ใน `~/.config/dot-mcp/`.
+ข้อจำกัดแผนฟรีของ tunnl.gg: URL เป็นชื่อสุ่มที่ผู้ให้บริการกำหนด (ไม่สามารถเลือก prefix `dot-mcp-` เองได้); tunnel หมดอายุหลัง 24 ชั่วโมง หรือหลังไม่มี traffic 2 ชั่วโมง ต้องรัน `./expose.sh` ใหม่เพื่อเชื่อมต่ออีกครั้ง แต่ URL จะคงเดิมเมื่อใช้ SSH key เดิม ต้องมี OpenSSH (`ssh` และ `ssh-keygen`) และเครื่องต้องออนไลน์ขณะใช้ MCP อย่าเผยแพร่ private key ใน `~/.config/dot-mcp/`
 
 สคริปต์จะตรวจ MCP `initialize` ผ่าน public HTTPS ก่อนแสดง URL หากการทดสอบไม่ผ่านจะรายงานข้อผิดพลาดแทนการบอกว่าเชื่อมต่อสำเร็จ MCP สคริปต์จะรายงานว่าไม่ผ่านแทนการแสดงว่าใช้งานได้ URL แบบสุ่มนี้ **ไม่คงเดิมเมื่อรันใหม่** และชื่อที่ขึ้นต้น `dot-mcp-` ไม่ได้แปลว่าถูกจองถาวร
 
@@ -73,15 +74,14 @@ TUNNEL_PROVIDER=cloudflare ./expose.sh
 export TUNNEL_PROVIDER=ngrok
 export NGROK_AUTHTOKEN='ใส่-authtoken-ของคุณ'
 export NGROK_DOMAIN='โดเมนที่-ngrok-assign-ให้คุณ'
-export MCP_AUTH_TOKEN="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 ./expose.sh
 ```
 
-สคริปต์จะตรวจสอบ `/health` และส่ง MCP `initialize` ผ่าน public URL ก่อนแสดง URL สำหรับ ChatGPT หากใช้ ngrok ต้องใช้ `NGROK_DOMAIN` เดิมทุกครั้ง และเก็บ authtoken/MCP token เป็นความลับ การมี URL คงที่ไม่ได้หมายความว่าเซิร์ฟเวอร์จะออนไลน์เมื่อเครื่องปิดอยู่
+สคริปต์จะตรวจสอบ `/health` และส่ง MCP `initialize` ผ่าน public URL ก่อนแสดง URL สำหรับ ChatGPT หากใช้ ngrok ต้องใช้ `NGROK_DOMAIN` เดิมทุกครั้ง และเก็บ authtoken เป็นความลับ การมี URL คงที่ไม่ได้หมายความว่าเซิร์ฟเวอร์จะออนไลน์เมื่อเครื่องปิดอยู่
 
 หมายเหตุ: `expose.sh` ไม่ดาวน์โหลด ngrok ให้อัตโนมัติ เพราะต้องใช้ binary ที่เหมาะกับระบบปฏิบัติการ/สถาปัตยกรรมของเครื่อง โดยเฉพาะ Android/Termux อาจต้องใช้วิธีติดตั้งที่รองรับ Termux โดยตรง
 
-เมื่อเริ่มสำเร็จ ให้เอา `MCP URL` ที่สคริปต์แสดงไปใส่ Settings > Apps > Advanced > Developer Mode > Add connector และตั้ง Bearer token ตามค่าที่สคริปต์แสดง
+เมื่อเริ่มสำเร็จ ให้เอา `MCP URL` ที่สคริปต์แสดงไปใส่ Settings > Apps > Advanced > Developer Mode > Add connector (ไม่ต้องตั้ง token)
 
 ## Embedded UI in ChatGPT
 
@@ -91,18 +91,18 @@ When connected through a ChatGPT MCP connector that supports MCP Apps, call `ope
 
 | ตัวแปร | ค่าเริ่มต้น | หมายถึง |
 |---|---|---|
-| `MCP_HOST` / `MCP_PORT` | `127.0.0.1` / `8088` | bind server |
-| `MCP_AUTH_TOKEN` | `""` (off) | Bearer auth, ว่าง = loopback only |
+| `MCP_HOST` / `MCP_PORT` | `127.0.0.1` / `33041` | bind server |
 | `MCP_PUBLIC_HOST` | `""` | tunnel host ที่ allow (`expose.sh` ตั้งให้เอง) |
-| `DOT_MCP_DATA` | `~/.dot-mcp` | ที่เก็บ memory/state/inbox/rules/schedules |
+| `DOT_MCP_DATA` | `~/.dot-mcp` | ที่เก็บ memory/state/inbox/schedules |
 | `MCP_TRUNC_LIMIT` | `8192` | ตัด stdout ยาวๆ แล้วให้ต่อด้วย `read_output` |
 | `HOME` / `TMPDIR` | — | `resolve()` จำกัด path อยู่ใน HOME/TMPDIR//sdcard, `/tmp` ถูก map ไป `$TMPDIR` (Android ไม่มี /tmp) |
 
-ไฟล์ข้อมูล: `memory.json`, `state.json`, `inbox.json`, `rules.json`, `schedules.json`, `approvals.json`
+ไฟล์ข้อมูล: `memory.json`, `state.json`, `inbox.json`, `schedules.json`
 
 ## Files
 
 ```
+dots            # CLI: start / status / stop (port 33041 default)
 dot_mcp.py      # MCP server + tools
 ui/workspace.html # Codex-inspired embedded workspace UI (MCP Apps)
 local_agent.py  # ChatGPT model + MCP local (ไม่ต้อง tunnel)
@@ -114,9 +114,20 @@ bin/cloudflared   # auto-download (arm64) — ไม่ commit
 
 ## Security
 
-- ไม่มี token = ใครมี URL ก็สั่ง shell เครื่องได้ — ใช้ local อย่างเดียว หรือเปิด tunnel เฉพาะตอนใช้ + ปิดทันที
-- มี token = ส่ง `Authorization: Bearer xxx` ทุก request (ทั้ง `/mcp`)
-- งานเสี่ยง: ตั้ง rule `add_rule` แบบ `ask`/`block` ด้วย regex (เช่น `rm -rf|mkfs|dd `) แล้วให้ agent `request_approval` ก่อนรัน
+- `/mcp/` ต้องมี `Authorization: Bearer` เสมอ (JWT จาก OAuth หรือ owner secret) — ไม่มี = 401 แม้ localhost (ตั้งใจ: traffic จาก tunnel ดูเหมือน loopback แยกไม่ออก)
+- Owner secret อยู่ใน header/consent form ไม่โผล่ใน URL, log (`mcp.log` ตั้ง `600` + ปิด access log), เปิด tunnel เฉพาะตอนใช้ + ปิดทันที
+
+## OAuth (ChatGPT / Claude / Gemini)
+
+ฟรี ทำเองในไฟล์เดียว ไม่ต้องมี IdP เจ้าอื่น — server นี้เป็นทั้งคนออกและคนตรวจ token:
+
+- Metadata: `/.well-known/oauth-authorization-server` + `/.well-known/oauth-protected-resource`
+- `POST /register` — Dynamic Client Registration (รับ `redirect_uris` https, หรือ `http://localhost`/`127.0.0.1`)
+- `GET/POST /authorize` — หน้า consent ครั้งเดียว ปลดล็อกด้วย owner secret (code + PKCE S256, อายุ 10 นาที, ใช้ครั้งเดียว)
+- `POST /token` — แลก code เป็น JWT (1 ชม.) + refresh token (30 วัน, หมุนทุกครั้งที่ใช้)
+- เรียก MCP ใส่ `Authorization: Bearer <jwt>` ได้เลย (OAuth) หรือ `Bearer <owner secret>` (สคริปต์ local)
+- ตั้งค่า connector: URL = `https://<host>/mcp/`, auth = OAuth, issuer = `https://<host>` (ดูจาก `/.well-known/...` ได้)
+- connector แบบ DCR (ChatGPT) สมัคร client เอง + PKCE; แบบกรอกมือ (Claude) ใช้ **OAuth client ID/secret** ประจำเครื่องที่ `dots start` โชว์ (เก็บใน `oauth.json` 0600, ไม่ต้อง register)
 
 ## License
 

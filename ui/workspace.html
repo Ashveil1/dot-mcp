@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dots Workspace</title>
+<style>
+:root { color-scheme: light dark; --bg: #0f172a; --card: #1e293b; --fg: #e2e8f0; --muted: #94a3b8; --acc: #38bdf8; }
+* { box-sizing: border-box; } body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+header { padding: 16px 20px; border-bottom: 1px solid #334155; display: flex; gap: 12px; align-items: center; }
+header h1 { font-size: 18px; margin: 0; } nav { display: flex; gap: 8px; padding: 12px 20px; flex-wrap: wrap; }
+nav button { background: #334155; color: var(--fg); border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+nav button.active { background: var(--acc); color: #06202e; font-weight: 700; }
+main { padding: 0 20px 40px; display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.card { background: var(--card); border-radius: 12px; padding: 14px; }
+.card h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 320px; overflow: auto; margin: 0; }
+.hint { padding: 12px 20px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<header><h1>Dots Workspace</h1><span id="health">loading…</span></header>
+<div class="hint">This panel is the <code>open_workspace</code> MCP App. Data comes from the <code>open_workspace</code> tool (goal, tasks, memory, inbox, sessions, schedules). If empty, call the tool from ChatGPT first.</div>
+<nav>
+<button data-v="overview" class="active">Overview</button>
+<button data-v="tasks">Tasks</button>
+<button data-v="memory">Memory</button>
+<button data-v="activity">Activity/Schedules</button>
+</nav>
+<main>
+<section class="card" data-cards="overview tasks"><h2>Goal</h2><pre id="goal">—</pre></section>
+<section class="card" data-cards="overview tasks"><h2>Tasks</h2><pre id="tasks">—</pre></section>
+<section class="card" data-cards="overview memory"><h2>Memory</h2><pre id="memory">—</pre></section>
+<section class="card" data-cards="overview activity"><h2>Sessions</h2><pre id="sessions">—</pre></section>
+<section class="card" data-cards="overview activity"><h2>Inbox / Schedules</h2><pre id="misc">—</pre></section>
+<section class="card" data-cards="overview"><h2>Raw</h2><pre id="raw">—</pre></section>
+</main>
+<script>
+// MCP Apps hosts differ; try common bridges, else show guidance.
+// ChatGPT calls the open_workspace tool and passes its JSON here via hash or postMessage.
+function render(ws) {
+  try {
+    document.getElementById('health').textContent = 'ok · ' + (ws.memory_count || 0) + ' memories · ' + (ws.open_tasks || 0) + ' open tasks';
+    document.getElementById('goal').textContent = ws.goal || '(no goal — use set_goal)';
+    document.getElementById('tasks').textContent = JSON.stringify(ws.tasks || [], null, 2);
+    document.getElementById('memory').textContent = JSON.stringify(ws.memory || [], null, 2);
+    document.getElementById('sessions').textContent = JSON.stringify(ws.sessions || [], null, 2);
+    document.getElementById('misc').textContent = JSON.stringify({unread_inbox: ws.unread_inbox, schedules: ws.schedules}, null, 2);
+    document.getElementById('raw').textContent = JSON.stringify(ws, null, 2).slice(0, 6000);
+  } catch (e) { document.getElementById('health').textContent = 'render error: ' + e; }
+}
+function fromHash() {
+  try {
+    if (location.hash.length > 1) {
+      const o = JSON.parse(decodeURIComponent(location.hash.slice(1)));
+      if (o.workspace) return o.workspace;
+      if (o.goal !== undefined) return o;
+    }
+  } catch (e) {}
+  return null;
+}
+window.addEventListener('message', (ev) => {
+  try {
+    const d = ev.data;
+    if (d && d.workspace) render(d.workspace);
+    else if (d && d.goal !== undefined) render(d);
+  } catch (e) {}
+});
+const h = fromHash();
+if (h) render(h);
+else if (window.__WORKSPACE__) render(window.__WORKSPACE__.workspace || window.__WORKSPACE__);
+else document.getElementById('health').textContent = 'waiting for open_workspace data…';
+document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  const v = b.dataset.v;
+  document.querySelectorAll('main .card').forEach(c => {
+    const tags = (c.dataset.cards || 'overview').split(' ');
+    c.style.display = (v === 'overview' || tags.includes(v)) ? '' : 'none';
+  });
+}));
+</script>
+</body>
+</html>

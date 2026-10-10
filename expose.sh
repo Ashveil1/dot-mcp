@@ -4,20 +4,20 @@
 # Default (stable random tunnl.gg URL; no provider account or key registration):
 #   ./expose.sh
 #
-# The SSH key and MCP token are generated once and stored in ~/.config/dot-mcp.
+# The SSH key is generated once and stored in ~/.config/dot-mcp.
+# NOTE: OPEN-ACCESS MODE — no token. Anyone with the URL gets full shell.
 #
 # Stable ngrok URL (one-time setup in your shell environment):
 #   export TUNNEL_PROVIDER=ngrok
 #   export NGROK_AUTHTOKEN='...'
 #   export NGROK_DOMAIN='your-assigned-domain.ngrok-free.app'
-#   export MCP_AUTH_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 #   ./expose.sh
 #
 # NGROK_DOMAIN must be the domain assigned to your ngrok account.
 set -Eeuo pipefail
 cd "$(dirname "$0")"
 
-PORT="${MCP_PORT:-8088}"
+PORT="${MCP_PORT:-33041}"
 PROVIDER="${TUNNEL_PROVIDER:-tunnl}"
 mkdir -p logs bin
 
@@ -51,21 +51,26 @@ if [[ ! -x .venv/bin/python ]]; then
   exit 1
 fi
 
-# Persist credentials locally so the URL and connector token survive reruns.
+# Owner secret: stable per machine (persisted 0600; env wins if exported).
+# Local scripts + OAuth consent share it; OAuth login tokens live separately in oauth.json.
 STATE_DIR="${DOT_MCP_STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/dot-mcp}"
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR"
-if [[ -z "${MCP_AUTH_TOKEN:-}" ]]; then
-  if [[ -s "$STATE_DIR/auth_token" ]]; then
-    MCP_AUTH_TOKEN="$(cat "$STATE_DIR/auth_token")"
+if [[ -z "${MCP_PATH_SECRET:-}" ]]; then
+  if [[ -s "$STATE_DIR/owner_secret" ]]; then
+    MCP_PATH_SECRET="$(cat "$STATE_DIR/owner_secret")"
   else
-    MCP_AUTH_TOKEN="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-    (umask 077; printf '%s\n' "$MCP_AUTH_TOKEN" > "$STATE_DIR/auth_token")
-    echo "Generated and saved persistent MCP token at $STATE_DIR/auth_token"
+    MCP_PATH_SECRET="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    (umask 077; printf '%s\n' "$MCP_PATH_SECRET" > "$STATE_DIR/owner_secret")
+    echo "Generated and saved owner secret at $STATE_DIR/owner_secret"
   fi
 fi
-export MCP_AUTH_TOKEN
+export MCP_PATH_SECRET
+unset MCP_AUTH_TOKEN
 export MCP_PORT="$PORT"
+# Logs may contain the secret URL — keep them owner-only.
+touch mcp.log tunnel.log
+chmod 600 mcp.log tunnel.log 2>/dev/null || true
 
 # Start local MCP server if it is not already healthy.
 health="$(curl -fsS --max-time 3 "http://127.0.0.1:$PORT/health" 2>/dev/null || true)"
@@ -218,29 +223,36 @@ nohup .venv/bin/python dot_mcp.py > mcp.log 2>&1 &
 sleep 3
 
 # Verify the public endpoint using MCP initialize, not only /health.
-CODE="$(curl -sS --max-time 15 -o /tmp/dot-mcp-initialize.out -w '%{http_code}' -X POST "$URL/mcp" \
+# Respect $TMPDIR (Android has no writable /tmp).
+_TMP="${TMPDIR:-/tmp}"
+_INIT_OUT="$_TMP/dot-mcp-initialize.out"
+_MCP_URL="$URL/mcp/"
+_AUTH_HEADER=()
+if [[ -n "${MCP_PATH_SECRET:-}" ]]; then
+  _AUTH_HEADER=(-H "Authorization: Bearer $MCP_PATH_SECRET")
+fi
+CODE="$(curl -sS --max-time 15 -o "$_INIT_OUT" -w '%{http_code}' -X POST "$_MCP_URL" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
-  -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+  "${_AUTH_HEADER[@]}" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"dot-mcp-check","version":"1"}}}' || true)"
-if [[ "$CODE" != "200" ]] || ! grep -q '"jsonrpc"' /tmp/dot-mcp-initialize.out; then
+if [[ "$CODE" != "200" ]] || ! grep -q '"jsonrpc"' "$_INIT_OUT"; then
   echo "Public MCP initialize check failed (HTTP $CODE); endpoint may be unavailable or blocked by a tunnel interstitial." >&2
   tail -30 mcp.log >&2 || true
   [[ "$PROVIDER" == "ngrok" || "$PROVIDER" == "serveo" ]] && tail -20 tunnel.log >&2 || true
-  head -c 600 /tmp/dot-mcp-initialize.out >&2 || true
+  head -c 600 "$_INIT_OUT" >&2 || true
   echo >&2
   exit 1
 fi
 
 echo
 echo "============== COPY TO CHATGPT =============="
-echo "MCP URL: $URL/mcp"
-echo "Auth:    Bearer token required"
-echo "Token:   $MCP_AUTH_TOKEN"
+echo "MCP URL: $_MCP_URL"
+echo "(auth = OAuth — approve with owner secret at $URL/authorize; local scripts use Bearer secret)"
 echo "Health:  $URL/health"
 if [[ "$PROVIDER" == "tunnl" ]]; then
   echo "Note: URL is tied to the saved SSH key and stays the same on reconnect. Free tunnel expires after 24h or 2h idle."
-  echo "Persistent state: $STATE_DIR (keep it safe; it contains the SSH private key and MCP token)."
+  echo "Persistent state: $STATE_DIR (keep it safe; it contains the SSH private key)."
 elif [[ "$PROVIDER" == "cloudflare" ]]; then
   echo "Note: Cloudflare Quick Tunnel URL is temporary and may change next run."
 elif [[ "$PROVIDER" == "ngrok" ]]; then

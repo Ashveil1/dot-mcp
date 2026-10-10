@@ -4,5 +4,6 @@ if [ ! -x .venv/bin/python ]; then
   echo "run ./setup.sh first"; exit 1
 fi
 .venv/bin/python dot_mcp.py --check
-echo "--- starting on 8088 ---"
-MCP_PORT=8088 .venv/bin/python dot_mcp.py
+PORT="${MCP_PORT:-33041}"
+echo "--- starting on $PORT ---"
+MCP_PORT="$PORT" .venv/bin/python dot_mcp.py
