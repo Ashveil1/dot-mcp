@@ -8,7 +8,7 @@ loopback, so there is intentionally NO localhost bypass.
 from __future__ import annotations
 import base64, hashlib, hmac, json, logging, os, secrets, signal, subprocess, tempfile, threading, time, uuid
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode, urlsplit
 
 HOME = Path(os.environ.get("HOME", str(Path.home()))).resolve()
 TMPDIR = Path(os.environ.get("TMPDIR", str(HOME / "tmp")))
@@ -57,7 +57,7 @@ def resolve(p: str) -> Path:
         q = (HOME / q)
     q = _map_tmp(q)
     # safety: stay inside HOME, TMPDIR, or /sdcard if shared storage
-    r = q.resolve() if q.exists() else (q.parent.resolve() / q.name if q.parent.exists() else q.absolute())
+    r = q.resolve(strict=False)
     allowed = [HOME.resolve(), TMPDIR.resolve()]
     for extra in (Path("/sdcard"), HOME / "storage"):
         try:
@@ -107,25 +107,38 @@ def _file_lock(f: Path, exclusive: bool):
     if not _HAS_FCNTL:
         yield
         return
+    # Lock acquisition failures must stop the mutation, not bypass exclusion.
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with open(f.parent / (f.name + ".lock"), "a") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def _atomic_text(f: Path, content: str, private: bool = False):
+    f.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=f.parent)
     try:
-        f.parent.mkdir(parents=True, exist_ok=True)
-        with open(f.parent / (f.name + ".lock"), "w") as lf:
-            fcntl.flock(lf, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-            try:
-                yield
-            finally:
-                fcntl.flock(lf, fcntl.LOCK_UN)
-    except Exception:
-        yield  # never break serving because locking failed
+        if f.exists() and not private:
+            os.fchmod(fd, f.stat().st_mode & 0o777)
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(content)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, f)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
 
 def save_json(f: Path, obj):
     with _file_lock(f, exclusive=True):
         _write_json(f, obj)
 
 def _write_json(f: Path, obj):
-    tmp = f.with_suffix(".tmp")
-    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, f)
+    _atomic_text(f, json.dumps(obj, ensure_ascii=False, indent=2), private=True)
 
 def mutate_json(f: Path, default, fn):
     """Atomically load, transform, save. fn(data) -> (new_data, result)."""
@@ -300,7 +313,9 @@ except Exception:
     srv = _Server("dot-agent")
 
 instructions = ("Persistent Termux agent (dot-like): shell + files + memory + goals + tasks. "
-    "Relative paths resolve from $HOME. Use memory tools to keep context across chats.")
+    "At chat start use bootstrap_context. For multi-step work create_work_task, "
+    "start_command, inspect read_output/status, then update_work_task with a verified "
+    "result or blocker. Relative paths resolve from $HOME. Full shell is not a sandbox.")
 try: srv.instructions = instructions
 except Exception: pass
 
@@ -331,7 +346,11 @@ def run_command(command: str, cwd: str = "~", timeout: int = 30) -> dict:
 @srv.tool()
 def read_output(session_id: str, stream: str = "stdout", offset: int = 0, length: int = 8192) -> dict:
     """Continue reading a background command output."""
-    return _pack_session(session_id, stream, offset, length)
+    with SESSIONS_LOCK:
+        legacy = session_id in SESSIONS
+    if legacy:
+        return _pack_session(session_id, stream, offset, length)
+    return _work_store().read_output(session_id, stream, offset, length)
 
 @srv.tool()
 def list_dir(path: str = "~", limit: int = 100) -> dict:
@@ -367,38 +386,37 @@ def read_file(path: str, offset: int = 1, limit: int | None = 200, line_numbers:
 def write_file(path: str, content: str, expected_sha256: str | None = None, create_only: bool = False) -> dict:
     """Atomically create/replace one UTF-8 file (+parents). Guards: expected_sha256 / create_only."""
     p = resolve(path)
-    if create_only and p.exists(): raise ValueError("exists (create_only)")
-    if expected_sha256 and p.exists() and sha256_file(p) != expected_sha256:
-        raise ValueError("stale file (sha mismatch), re-read first")
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=str(p.parent), encoding="utf-8") as f:
-        f.write(content); tmp = f.name
-    os.replace(tmp, p)
-    return {"path": str(p), "sha256": sha256_file(p)}
+    with _file_lock(p, exclusive=True):
+        if create_only and p.exists():
+            raise ValueError("exists (create_only)")
+        if expected_sha256 and (not p.exists() or sha256_file(p) != expected_sha256):
+            raise ValueError("stale file (sha mismatch or missing), re-read first")
+        _atomic_text(p, content)
+        return {"path": str(p), "sha256": sha256_file(p)}
 
 @srv.tool()
 def append_file(path: str, content: str) -> dict:
-    """Append text to file (creates parents)."""
-    p = resolve(path); p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "a", encoding="utf-8") as f: f.write(content)
-    return {"path": str(p), "sha256": sha256_file(p)}
+    """Append text to file (creates parents). Serialized with other file mutations."""
+    p = resolve(path)
+    with _file_lock(p, exclusive=True):
+        src = p.read_text(encoding="utf-8") if p.exists() else ""
+        _atomic_text(p, src + content)
+        return {"path": str(p), "sha256": sha256_file(p)}
 
 @srv.tool()
 def edit_file(path: str, match_text: str, write_text: str, mode: str = "replace_match") -> dict:
     """Single edit: replace_match | insert_before | insert_after. match must be unique."""
     p = resolve(path)
-    src = p.read_text(encoding="utf-8")
-    n = src.count(match_text)
-    if n != 1: raise ValueError(f"match found {n}x, need exactly 1")
-    if mode == "replace_match": dst = src.replace(match_text, write_text)
-    elif mode == "insert_before": dst = src.replace(match_text, write_text + match_text)
-    elif mode == "insert_after": dst = src.replace(match_text, match_text + write_text)
-    else: raise ValueError("bad mode")
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=str(p.parent), encoding="utf-8") as f:
-        f.write(dst); tmp = f.name
-    os.replace(tmp, p)
-    return {"path": str(p), "sha256": sha256_file(p)}
+    with _file_lock(p, exclusive=True):
+        src = p.read_text(encoding="utf-8")
+        n = src.count(match_text)
+        if n != 1: raise ValueError(f"match found {n}x, need exactly 1")
+        if mode == "replace_match": dst = src.replace(match_text, write_text)
+        elif mode == "insert_before": dst = src.replace(match_text, write_text + match_text)
+        elif mode == "insert_after": dst = src.replace(match_text, match_text + write_text)
+        else: raise ValueError("bad mode")
+        _atomic_text(p, dst)
+        return {"path": str(p), "sha256": sha256_file(p)}
 
 @srv.tool()
 def remember(note: str, tag: str = "general") -> dict:
@@ -538,6 +556,88 @@ def remove_schedule(jid: str) -> dict:
         return [j for j in jobs if not (isinstance(j, dict) and j.get("id", "").startswith(jid))], {"ok": True}
     return mutate_json(SCHED_FILE, [], _drop)
 
+# ---- Durable work tools: lazy storage initialization, no separate AI API ----
+_WORK_STORE = None
+_WORK_INIT_LOCK = threading.Lock()
+
+def _work_store():
+    global _WORK_STORE
+    with _WORK_INIT_LOCK:
+        if _WORK_STORE is None:
+            from dot_mcp.work import WorkStore
+            _WORK_STORE = WorkStore(DATA_DIR, resolve, _shell)
+        return _WORK_STORE
+
+@srv.tool()
+def create_work_task(title: str, detail: str = "") -> dict:
+    """Create durable work. Use for multi-step work that must survive a new chat."""
+    return _work_store().create_task(title, detail)
+
+@srv.tool()
+def get_work_task(task_id: str) -> dict:
+    """Inspect durable task state, checkpoints, sessions and artifact references."""
+    return _work_store().get_task(task_id)
+
+@srv.tool()
+def list_work_tasks(state: str = "", limit: int = 20) -> dict:
+    """List durable work; states pending/running/blocked/done/failed/cancelled/interrupted."""
+    return _work_store().list_tasks(state, limit)
+
+@srv.tool()
+def update_work_task(task_id: str, state: str, note: str = "", result: str = "", blocker: str = "") -> dict:
+    """Save a checkpoint/state. Done requires a verified result; blocked needs a question."""
+    return _work_store().update_task(task_id, state, note, result, blocker)
+
+@srv.tool()
+def start_command(command: str, cwd: str = "~", timeout: int = 300, task_id: str = "", idempotency_key: str = "") -> dict:
+    """Start tracked shell and return immediately. Poll read_output/status, then verify the result.
+    Use a stable idempotency_key for retries of the same request. Full shell, not a sandbox.
+    """
+    return _work_store().start(command, cwd, timeout, task_id, idempotency_key)
+
+@srv.tool()
+def get_session_status(session_id: str) -> dict:
+    """Inspect durable command state. Exit zero does not finish its task automatically."""
+    return _work_store().status(session_id)
+
+@srv.tool()
+def cancel_command(session_id: str) -> dict:
+    """Request cancellation of a tracked command/process group; poll status to confirm."""
+    return _work_store().cancel(session_id)
+
+@srv.tool()
+def register_artifact(task_id: str, path: str, name: str = "") -> dict:
+    """Record an existing output file and SHA. Local reference, not a download link."""
+    return _work_store().artifact(task_id, path, name)
+
+@srv.tool()
+def bootstrap_context(limit: int = 10) -> dict:
+    """Call at chat start to load active work, checkpoints, unread results and file references."""
+    context = _work_store().context(limit)
+    state = load_json(STATE_FILE, {})
+    context["goal"] = str(state.get("goal", ""))[:2000] if isinstance(state, dict) else ""
+    context["memory"] = [{**item, "note": str(item.get("note", ""))[:1000]}
+                         for item in recall(limit=min(max(1, limit), 20))["items"]]
+    # Old tool names remain compatible; show their current task data separately.
+    context["legacy_tasks"] = [item for item in state.get("tasks", []) if not item.get("done")][-min(max(1, limit), 20):] if isinstance(state, dict) else []
+    context["legacy_tasks"] = [{"id": item.get("id"), "title": str(item.get("title", ""))[:500],
+                                "detail": str(item.get("detail", ""))[:1000]} for item in context["legacy_tasks"]]
+    context["legacy_inbox"] = inbox_list(True, min(max(1, limit), 20))
+    context["legacy_inbox"]["items"] = [{**item, "text": str(item.get("text", ""))[:1000]}
+                                        for item in context["legacy_inbox"]["items"]]
+    context["note"] = "Inspect current sources before acting; saved context is history. Commands are never replayed automatically."
+    return context
+
+@srv.tool()
+def ack_work_result(result_id: int) -> dict:
+    """Acknowledge a durable command result after reviewing it."""
+    return _work_store().ack_result(result_id)
+
+@srv.tool()
+def purge_session_output(session_id: str) -> dict:
+    """Remove reviewed finished output at your explicit choice; keep session/event metadata."""
+    return _work_store().purge_output(session_id)
+
 # ---- Minimal single-user OAuth 2.1 AS (DCR + PKCE) for ChatGPT/Claude/Gemini ----
 # Free, self-hosted: this server is both authorization server and resource server.
 # Consent is gated by the path SECRET (holder == owner). Capability-URL access
@@ -656,7 +756,7 @@ def _oauth_metadata() -> dict:
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
-        "token_endpoint_auth_methods_supported": ["none"],
+        "token_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post"],
         "scopes_supported": [OAUTH_SCOPE],
     }
 
@@ -669,14 +769,27 @@ def _oauth_protected_resource() -> dict:
     }
 
 def _valid_redirect(uri: str) -> bool:
+    """Allow HTTPS callbacks and exact HTTP loopback hosts, never lookalikes."""
     try:
-        if uri.startswith("https://"):
-            return True
-        if uri.startswith("http://localhost") or uri.startswith("http://127.0.0.1"):
-            return True
-    except Exception:
-        pass
-    return False
+        if not isinstance(uri, str) or any(c.isspace() or ord(c) < 32 for c in uri):
+            return False
+        parsed = urlsplit(uri)
+        # Reading .port validates malformed/out-of-range ports as well.
+        parsed.port
+        if (not parsed.hostname or parsed.username is not None
+                or parsed.password is not None or "#" in uri or "\\" in uri):
+            return False
+        return parsed.scheme == "https" or (
+            parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1"))
+    except (ValueError, TypeError):
+        return False
+
+
+def _valid_pkce(challenge: str, method: str) -> bool:
+    """A base64url SHA-256 challenge is exactly 43 unpadded characters."""
+    return (method == "S256" and len(challenge) == 43
+            and all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+                    for c in challenge))
 
 async def _oauth_meta_req(req):
     from starlette.responses import JSONResponse
@@ -717,19 +830,20 @@ async def _oauth_authorize_req(req):
         st = _oauth_state()
         cl, static = _oauth_find_client(st, q.get("client_id", ""))
         ruri = q.get("redirect_uri", "")
-        ok_uri = (ruri.startswith("https://") if static
+        ok_uri = ((_valid_redirect(ruri) and urlsplit(ruri).scheme == "https") if static
                   else bool(cl and ruri in cl.get("redirect_uris", [])))
         if not cl or not ok_uri:
             return JSONResponse({"error": "invalid_request",
                 "hint": "unknown client or redirect_uri — POST /register first"}, status_code=400)
         if q.get("response_type") != "code":
             return JSONResponse({"error": "unsupported_response_type"}, status_code=400)
-        if not static and (not q.get("code_challenge") or q.get("code_challenge_method", "S256") != "S256"):
+        if (not static or q.get("code_challenge")) and not _valid_pkce(
+                q.get("code_challenge", ""), q.get("code_challenge_method", "")):
             return JSONResponse({"error": "invalid_request",
                 "hint": "PKCE S256 code_challenge required for dynamic clients"}, status_code=400)
         scope = q.get("scope", OAUTH_SCOPE)
         hidden = "".join(f'<input type="hidden" name="{k}" value="{_html.escape(q.get(k, ""))}">'
-            for k in ("client_id", "redirect_uri", "code_challenge", "scope", "state", "resource"))
+            for k in ("client_id", "redirect_uri", "code_challenge", "code_challenge_method", "scope", "state", "resource"))
         page = ("<!doctype html><html><head><meta charset=utf-8>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
             "<title>Authorize dot-mcp</title></head>"
@@ -755,9 +869,13 @@ async def _oauth_authorize_req(req):
     st = _oauth_state()
     cl, static = _oauth_find_client(st, g("client_id"))
     ruri = g("redirect_uri")
-    ok_uri = (ruri.startswith("https://") if static
+    ok_uri = ((_valid_redirect(ruri) and urlsplit(ruri).scheme == "https") if static
               else bool(cl and ruri in (cl.get("redirect_uris", []) if cl else [])))
     if not cl or not ok_uri:
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+    # POST can be called directly, so enforce the same PKCE gate as GET.
+    if (not static or g("code_challenge")) and not _valid_pkce(
+            g("code_challenge"), g("code_challenge_method")):
         return JSONResponse({"error": "invalid_request"}, status_code=400)
     if not hmac.compare_digest(g("owner_secret").strip(), SECRET):
         return HTMLResponse("<h3>Wrong owner secret.</h3>", status_code=403)
@@ -789,16 +907,25 @@ async def _oauth_token_req(req):
     g = lambda k: str(form.get(k, ""))
     now = time.time()
     presented = g("client_secret")
-    if not presented:
-        auth = req.headers.get("authorization", "")
-        if auth.lower().startswith("basic "):
-            try:
-                presented = base64.b64decode(auth[6:].strip()).decode().partition(":")[2]
-            except Exception:
-                presented = ""
+    client_id = g("client_id")
+    auth = req.headers.get("authorization", "")
+    if auth.lower().startswith("basic "):
+        try:
+            basic = base64.b64decode(auth[6:].strip(), validate=True).decode()
+            basic_id, separator, basic_secret = basic.partition(":")
+            if not separator or presented:
+                raise ValueError("invalid or duplicate client authentication")
+            basic_id, basic_secret = unquote(basic_id), unquote(basic_secret)
+            if client_id and client_id != basic_id:
+                raise ValueError("conflicting client identifiers")
+            client_id, presented = basic_id, basic_secret
+        except (ValueError, UnicodeError):
+            return JSONResponse({"error": "invalid_client"}, status_code=401)
 
     def _client_ok(st: dict, cid: str) -> str | None:
-        """Verify client for token use. Returns 'static' | 'public' | None (reject)."""
+        """Bind the request to the client before using a code or refresh token."""
+        if not client_id or client_id != cid:
+            return None
         rec, static = _oauth_find_client(st, cid)
         if not rec:
             return None
@@ -829,7 +956,7 @@ async def _oauth_token_req(req):
         def _exchange(st):
             if not isinstance(st, dict):
                 st = {}
-            rec = st.setdefault("codes", {}).pop(code_in, None)
+            rec = st.setdefault("codes", {}).get(code_in)
             if not rec or rec.get("exp", 0) < now:
                 return st, ("invalid_grant", 400, None)
             if ruri_in != rec.get("redirect_uri"):
@@ -838,6 +965,7 @@ async def _oauth_token_req(req):
                 return st, ("invalid_client", 401, None)
             if not _pkce_ok(rec, verifier):
                 return st, ("invalid_grant", 400, None)
+            st["codes"].pop(code_in, None)
             cid, scope = rec.get("client_id", ""), rec.get("scope") or OAUTH_SCOPE
             ref = secrets.token_urlsafe(32)
             _prune_refresh(st, now)[hashlib.sha256(ref.encode()).hexdigest()] = {
@@ -845,25 +973,26 @@ async def _oauth_token_req(req):
             access = _jwt_issue(st.get("as_secret", ""), cid, scope)
             return st, (None, 200, {"access_token": access, "token_type": "Bearer",
                 "expires_in": 3600, "scope": scope, "refresh_token": ref})
-        _, out = mutate_json(OAUTH_FILE, {}, _exchange)
+        out = mutate_json(OAUTH_FILE, {}, _exchange)
         _oauth_chmod()
         err, status, payload = out
         if err:
             return JSONResponse({"error": err}, status_code=status)
-        return JSONResponse(payload)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
     if g("grant_type") == "refresh_token":
-        ref_in, cid_in = g("refresh_token"), g("client_id")
+        ref_in = g("refresh_token")
         def _rotate(st):
             if not isinstance(st, dict):
                 st = {}
             key = hashlib.sha256(ref_in.encode()).hexdigest() if ref_in else ""
-            rec = st.setdefault("refresh", {}).pop(key, None)
+            rec = st.setdefault("refresh", {}).get(key)
             if not rec or rec.get("exp", 0) < now:
                 return st, ("invalid_grant", 400, None)
-            if cid_in and cid_in != rec.get("client_id", ""):
+            if client_id != rec.get("client_id", ""):
                 return st, ("invalid_grant", 400, None)
             if _client_ok(st, rec.get("client_id", "")) is None:
                 return st, ("invalid_client", 401, None)
+            st["refresh"].pop(key, None)
             cid, scope = rec.get("client_id", ""), rec.get("scope") or OAUTH_SCOPE
             ref = secrets.token_urlsafe(32)
             _prune_refresh(st, now)[hashlib.sha256(ref.encode()).hexdigest()] = {
@@ -871,12 +1000,12 @@ async def _oauth_token_req(req):
             access = _jwt_issue(st.get("as_secret", ""), cid, scope)
             return st, (None, 200, {"access_token": access, "token_type": "Bearer",
                 "expires_in": 3600, "scope": scope, "refresh_token": ref})
-        _, out = mutate_json(OAUTH_FILE, {}, _rotate)
+        out = mutate_json(OAUTH_FILE, {}, _rotate)
         _oauth_chmod()
         err, status, payload = out
         if err:
             return JSONResponse({"error": err}, status_code=status)
-        return JSONResponse(payload)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
     return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 
 # ---- Optional Codex-inspired embedded workspace UI (MCP Apps / v2 SDK) ----
@@ -985,6 +1114,20 @@ if __name__ == "__main__":
         app = srv.streamable_http_app(streamable_http_path=MCP_PATH, stateless_http=True,
             **({"transport_security": ts} if ts else {}))
     else:
+        # FastMCP v1 defaults to /mcp (without slash) and stateful sessions.
+        # Match the advertised endpoint and detached CLI health checks.
+        srv.settings.streamable_http_path = MCP_PATH
+        srv.settings.stateless_http = True
+        from mcp.server.transport_security import TransportSecuritySettings
+        hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+        origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+        for host in os.environ.get("MCP_PUBLIC_HOST", "").split(","):
+            host = host.strip().split("://")[-1].split("/")[0]
+            if host:
+                hosts.append(host)
+                origins.append("https://" + host)
+        srv.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=origins)
         app = srv.streamable_http_app()
     from starlette.responses import JSONResponse
     from starlette.routing import Route
@@ -1044,6 +1187,7 @@ if __name__ == "__main__":
     OAuthBearer.__name__ = "OAuthBearer"
     app.add_middleware(OAuthBearer)
     import uvicorn
+    _work_store()  # recover persistent command states before accepting requests
     sched_ensure()
     _oauth_static_client()  # ensure manual-connector credentials exist
     # Silence per-connection INFO spam from the MCP SDK ("Terminating session: ...").

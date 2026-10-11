@@ -9,6 +9,7 @@ import argparse, json, os, secrets, subprocess, sys
 from pathlib import Path
 
 from dot_mcp import orchestrator as ui
+from dot_mcp import lifecycle
 
 
 def _repo_root() -> Path:
@@ -23,8 +24,7 @@ def _repo_root() -> Path:
 
 
 REPO = _repo_root()
-STATE_DIR = Path(os.environ.get("DOT_MCP_STATE_DIR",
-                 os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) ) / "dot-mcp"
+STATE_DIR = lifecycle.state_dir()
 SECRET_FILE = STATE_DIR / "owner_secret"
 DEFAULT_PORT = 33041
 DEFAULT_DATA = str(Path.home() / ".dot-mcp")
@@ -71,10 +71,17 @@ def get_secret() -> str:
     s = secrets.token_urlsafe(32)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(STATE_DIR, 0o700)
-    tmp = SECRET_FILE.with_suffix(".tmp")
-    tmp.write_text(s + "\n", encoding="utf-8")
-    os.replace(tmp, SECRET_FILE)
-    os.chmod(SECRET_FILE, 0o600)
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=STATE_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(s + "\n")
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, SECRET_FILE)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
     return s
 
 
@@ -102,6 +109,21 @@ def _start_oauth_client(data_dir: str) -> dict:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
+    try:
+        with lifecycle.instance_lock(REPO):
+            if ui.port_in_use(args.port or DEFAULT_PORT):
+                if args.json:
+                    print(json.dumps({"ok": False, "reason": "port_in_use"}))
+                else:
+                    print("Port already in use; check dot-mcp status before starting.", file=sys.stderr)
+                return 1
+            return _cmd_start(args)
+    except (RuntimeError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+def _cmd_start(args: argparse.Namespace) -> int:
     port = args.port or DEFAULT_PORT
     data_dir = args.data_dir or DEFAULT_DATA
     # Owner secret: stable per machine (env wins, else file, else generate+save).
@@ -145,6 +167,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     with contextlib.redirect_stdout(buf):
         res = ui.plain_flow(ctx, STATE_DIR, console, leave_running=True)
     if not res.ok:
+        print(f"Start failed: {res.reason}. Check mcp.log and tunnel.log.", file=sys.stderr)
         return 1
 
     # Show all info in one shot
@@ -178,44 +201,16 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_stop(_: argparse.Namespace) -> int:
-    import signal as _sig
-    killed = 0
-    me = os.getpid()
     try:
-        # matches both `dot_mcp.py` (legacy) and `-m dot_mcp.server` (packaged)
-        out = subprocess.run(["pgrep", "-f", "dot_mcp[.]"],
-                             capture_output=True, text=True).stdout
-        for pid in out.split():
-            try:
-                pid_i = int(pid)
-            except ValueError:
-                continue
-            if pid_i == me:
-                continue
-            try:
-                with open(f"/proc/{pid_i}/cmdline", "rb") as fh:
-                    cmd = fh.read().replace(b"\x00", b" ").decode(errors="replace")
-                if "dot_mcp.cli" in cmd:   # never kill our own CLI
-                    continue
-            except Exception:
-                continue
-            try:
-                os.kill(pid_i, _sig.SIGTERM)
-                killed += 1
-            except Exception:
-                pass
-    except Exception:
-        pass
-    pidfile = REPO / "logs" / "tunnl.pid"
-    try:
-        if pidfile.is_file():
-            os.kill(int(pidfile.read_text().strip()), _sig.SIGTERM)
-            pidfile.unlink()
-            console.print("Tunnel stopped.")
-    except Exception:
-        pass
-    console.print(f"Stopped {killed} server(s). " if killed else "No server running.")
-    return 0
+        with lifecycle.instance_lock(REPO):
+            server = lifecycle.stop(REPO / "logs" / "server.json")
+            tunnel = lifecycle.stop(REPO / "logs" / "tunnel.json")
+            (REPO / "logs" / "tunnl.pid").unlink(missing_ok=True)
+        console.print(f"Stopped owned processes: server={server}, tunnel={tunnel}.")
+        return 0
+    except (RuntimeError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -56,5 +56,5 @@ include = [
     "test.sh",
     "expose.sh",
     "dots",
-    "dot_mcp.py",
+    "tests",
 ]

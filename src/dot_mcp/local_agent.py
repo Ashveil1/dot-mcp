@@ -16,14 +16,13 @@ MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 def _owner_secret() -> str:
     if os.environ.get("MCP_PATH_SECRET", "").strip():
         return os.environ["MCP_PATH_SECRET"].strip()
-    base = os.environ.get("DOT_MCP_STATE_DIR", "") or os.path.join(
-        os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")))
-    for name in ("owner_secret", "path_secret"):  # latter is legacy
+    from dot_mcp.lifecycle import state_dir
+    for name in ("owner_secret", "path_secret"):
         try:
-            s = open(os.path.join(base, "dot-mcp", name), encoding="utf-8").read().strip()
+            s = (state_dir() / name).read_text(encoding="utf-8").strip()
             if s:
                 return s
-        except Exception:
+        except OSError:
             pass
     return ""
 
