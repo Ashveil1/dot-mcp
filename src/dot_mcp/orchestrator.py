@@ -182,7 +182,7 @@ def _kill_proc(proc) -> None:
 
 def _boot_server(py: str, env: dict, repo: Path, logfile: Path,
                  pipe_out: bool = False):
-    """Boot dot_mcp.py. pipe_out=True keeps stdout for the live log tee."""
+    """Boot the server module. pipe_out=True keeps stdout for the live log tee."""
     logfile.parent.mkdir(parents=True, exist_ok=True)
     if not pipe_out:
         fh = open(logfile, "wb")
@@ -194,7 +194,7 @@ def _boot_server(py: str, env: dict, repo: Path, logfile: Path,
     else:
         out = subprocess.PIPE
     return subprocess.Popen(
-        [py, "dot_mcp.py"], cwd=str(repo), env=env,
+        [py, "-m", "dot_mcp.server"], cwd=str(repo), env=env,
         stdout=out, stderr=subprocess.STDOUT if not pipe_out else subprocess.STDOUT,
         stdin=subprocess.DEVNULL, start_new_session=True)
 
@@ -663,7 +663,7 @@ class LogTee(threading.Thread):
 
 
 def _boot_piped(py: str, env: dict, repo: Path):
-    return subprocess.Popen([py, "dot_mcp.py"], cwd=str(repo), env=env,
+    return subprocess.Popen([py, "-m", "dot_mcp.server"], cwd=str(repo), env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL, start_new_session=True)
 

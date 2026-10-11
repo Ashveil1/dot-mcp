@@ -19,3 +19,9 @@ bin/cloudflared
 # Local data (server state, not source)
 .dot-mcp/
 *.tmp
+
+# Packaging
+dist/
+build/
+src/*.egg-info/
+*.egg-info

@@ -77,7 +77,7 @@ health="$(curl -fsS --max-time 3 "http://127.0.0.1:$PORT/health" 2>/dev/null || 
 if ! grep -q '"tools"' <<<"$health"; then
   pkill -f '[d]ot_mcp\.py' 2>/dev/null || true
   sleep 1
-  nohup .venv/bin/python dot_mcp.py > mcp.log 2>&1 &
+  nohup env PYTHONPATH="$(pwd)/src" .venv/bin/python -m dot_mcp.server > mcp.log 2>&1 &
   for _ in $(seq 1 20); do
     health="$(curl -fsS --max-time 2 "http://127.0.0.1:$PORT/health" 2>/dev/null || true)"
     grep -q '"tools"' <<<"$health" && break
@@ -219,7 +219,7 @@ export MCP_PUBLIC_HOST="$HOST_ONLY"
 # Restart server so DNS-rebinding protection allows the public tunnel hostname.
 pkill -f '[d]ot_mcp\.py' 2>/dev/null || true
 sleep 1
-nohup .venv/bin/python dot_mcp.py > mcp.log 2>&1 &
+nohup env PYTHONPATH="$(pwd)/src" .venv/bin/python -m dot_mcp.server > mcp.log 2>&1 &
 sleep 3
 
 # Verify the public endpoint using MCP initialize, not only /health.

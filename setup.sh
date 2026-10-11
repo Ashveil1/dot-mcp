@@ -7,3 +7,6 @@ fi
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install "mcp>=1,<3" uvicorn
 echo "OK. run: ./run.sh"
+
+# install the package itself (editable) so `python -m dot_mcp.server` works
+.venv/bin/pip install -e . || echo "editable install failed — run.sh/expose.sh still set PYTHONPATH=src"

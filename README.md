@@ -19,19 +19,34 @@ Endpoint: `http://127.0.0.1:33041/mcp/` · Health: `/health`
 
 ## Quickstart
 
+**ติดตั้งจาก PyPI:**
+
 ```bash
-./dots start   # server + tunnel tunnl + public URL (port 33041, secret ประจำเครื่อง)
-./dots status  # เช็ค · ./dots stop = หยุด
+pip install dot-mcp
+dot-mcp start      # server + tunnel + public URL (port 33041, secret ประจำเครื่อง)
+dot-mcp status     # เช็คว่ารันอยู่ไหม
+dot-mcp stop       # หยุด server + tunnel
 ```
 
-สำรองแบบเดิม: `./setup.sh` + `./run.sh` + `./test.sh` + `./expose.sh` ยังใช้ได้
+`dot-mcp start` รัน server ในพื้นหลังแล้วคืน shell ทันที — จะได้ URL,
+owner secret, OAuth client ID/secret ให้เอาไปตั้ง connector เลย
+
+**รันจาก source checkout:**
+
+```bash
+./setup.sh   # สร้าง .venv + ติดตั้ง deps + editable install
+./dots start # เหมือนด้านบน
+```
+
+สำรอง: `./run.sh` (server เฉยๆ ไม่มี tunnel) · `./test.sh` (health + initialize) ·
+`./expose.sh` (tunnel เฉยๆสำหรับ ChatGPT connector)
 
 คุยแบบ local-only (ไม่ต้อง tunnel, ไม่ต้องจ่าย sub):
 
 ```bash
 export OPENAI_API_KEY=sk-...
-.venv/bin/python local_agent.py            # chat loop
-.venv/bin/python local_agent.py --list     # ดู tools เฉยๆ
+python -m dot_mcp.local_agent          # chat loop
+python -m dot_mcp.local_agent --list   # ดู tools เฉยๆ
 ```
 
 เทสผ่าน MCP client จริง:
