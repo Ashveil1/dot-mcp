@@ -30,6 +30,9 @@ dependencies = [
     "rich>=13",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx"]
+
 [project.urls]
 Homepage = "https://github.com/Ashveil1/dot-mcp"
 Repository = "https://github.com/Ashveil1/dot-mcp"

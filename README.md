@@ -108,29 +108,45 @@ When connected through a ChatGPT MCP connector that supports MCP Apps, call `ope
 |---|---|---|
 | `MCP_HOST` / `MCP_PORT` | `127.0.0.1` / `33041` | bind server |
 | `MCP_PUBLIC_HOST` | `""` | tunnel host ที่ allow (`expose.sh` ตั้งให้เอง) |
-| `DOT_MCP_DATA` | `~/.dot-mcp` | ที่เก็บ memory/state/inbox/schedules |
+| `DOT_MCP_DATA` | `~/.dot-mcp` | ที่เก็บ memory/state/inbox/schedules/oauth/audit |
 | `MCP_TRUNC_LIMIT` | `8192` | ตัด stdout ยาวๆ แล้วให้ต่อด้วย `read_output` |
+| `MCP_RATE_MCP_PER_MIN` | `300` | rate limit ต่อ IP บน `/mcp*` (เกิน → 429) |
+| `MCP_RATE_AUTH_PER_MIN` | `30` | rate limit ต่อ IP บน `/register` `/authorize` `/token` |
+| `MCP_SESSION_CAP` | `50` | จำนวน background session สูงสุด |
 | `HOME` / `TMPDIR` | — | `resolve()` จำกัด path อยู่ใน HOME/TMPDIR//sdcard, `/tmp` ถูก map ไป `$TMPDIR` (Android ไม่มี /tmp) |
 
-ไฟล์ข้อมูล: `memory.json`, `state.json`, `inbox.json`, `schedules.json`
+ไฟล์ข้อมูล: `memory.json`, `state.json`, `inbox.json`, `schedules.json`, `oauth.json` (0600), `audit.jsonl`
 
 ## Files
 
 ```
-dots            # CLI: start / status / stop (port 33041 default)
-dot_mcp.py      # MCP server + tools
-ui/workspace.html # Codex-inspired embedded workspace UI (MCP Apps)
-local_agent.py  # ChatGPT model + MCP local (ไม่ต้อง tunnel)
-agent_test.py   # client test: list tools + list_dir/get_state/remember/recall
+src/dot_mcp/server.py   # MCP server (22 tools + OAuth 2.1)
+src/dot_mcp/cli.py      # CLI: dot-mcp start/status/stop
+src/dot_mcp/orchestrator.py  # boot → tunnel → verify flow
+src/dot_mcp/ui/workspace.html  # embedded workspace UI (MCP Apps)
+src/dot_mcp/local_agent.py   # ChatGPT model + MCP local (ไม่ต้อง tunnel)
+src/dot_mcp/agent_test.py    # client smoke test
+tests/test_server.py    # pytest suite (รัน: .venv/bin/python -m pytest tests/ -q)
+dots                    # repo shim (./dots start)
 setup.sh / run.sh / test.sh / expose.sh
-requirements.txt  # mcp>=1,<3, uvicorn>=0.30
+pyproject.toml          # pip packaging (console scripts dot-mcp + dots)
+requirements.txt  # mcp>=1,<3, uvicorn>=0.30, rich>=13
 bin/cloudflared   # auto-download (arm64) — ไม่ commit
 ```
 
 ## Security
 
+> ⚠️ **เซิร์ฟเวอร์นี้ให้ shell เต็มเครื่องแก่ผู้ถือ credential** — ถือว่าเป็น production
+> เฉพาะเมื่อใช้คนเดียว + ปฏิบัติตามนี้
+
 - `/mcp/` ต้องมี `Authorization: Bearer` เสมอ (JWT จาก OAuth หรือ owner secret) — ไม่มี = 401 แม้ localhost (ตั้งใจ: traffic จาก tunnel ดูเหมือน loopback แยกไม่ออก)
-- Owner secret อยู่ใน header/consent form ไม่โผล่ใน URL, log (`mcp.log` ตั้ง `600` + ปิด access log), เปิด tunnel เฉพาะตอนใช้ + ปิดทันที
+- Owner secret อยู่ใน header/consent form ไม่โผล่ใน URL; log (`mcp.log`, `tunnel.log`) ตั้ง `600` + ปิด access log; เปิด tunnel เฉพาะตอนใช้ + ปิดทันที
+- Rate limit: `/mcp*` 300 req/min/IP, `/register` `/authorize` `/token` 30 req/min/IP (เกิน → 429) — ปรับผ่าน `MCP_RATE_MCP_PER_MIN` / `MCP_RATE_AUTH_PER_MIN`
+- ทุก request ถูกบันทึก `audit.jsonl` (เวลา/IP/method/path/status/tool) — ตรวจย้อนหลังได้
+- Consent POST ตรวจ `Origin`/`Referer` ว่าตรง issuer (กัน CSRF ข้ามเว็บ)
+- Refresh token เก็บแบบ hash + หมุนทุกครั้งที่ใช้; JWT ตรวจลายเซ็น/issuer/audience/expiry/scope
+- ไฟล์ state ล็อกข้าม process (`fcntl`) + เขียน atomic (tmp + rename) — รัน server ซ้อนกันไม่ทำข้อมูลพัง
+- **ข้อจำกัดที่ต้องรู้:** provider ของ tunnel (tunnl/cloudflare) เห็น traffic เพราะ TLS จบที่ edge เขา; rate limit/audit เป็น per-process (รันหลาย process ให้นับแยกกัน); backup `~/.dot-mcp` เอง (ไม่มีระบบ backup ในตัว)
 
 ## OAuth (ChatGPT / Claude / Gemini)
 

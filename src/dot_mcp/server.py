@@ -6,7 +6,7 @@ No header (even loopback) -> 401. Tunnelled traffic looks like
 loopback, so there is intentionally NO localhost bypass.
 """
 from __future__ import annotations
-import base64, hashlib, hmac, json, logging, os, secrets, shlex, signal, subprocess, tempfile, threading, time, uuid
+import base64, hashlib, hmac, json, logging, os, secrets, signal, subprocess, tempfile, threading, time, uuid
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -19,6 +19,7 @@ MEM_FILE = DATA_DIR / "memory.json"
 STATE_FILE = DATA_DIR / "state.json"
 INBOX_FILE = DATA_DIR / "inbox.json"
 SCHED_FILE = DATA_DIR / "schedules.json"
+AUDIT_FILE = DATA_DIR / "audit.jsonl"
 HOST = os.environ.get("MCP_HOST", "127.0.0.1")
 PORT = int(os.environ.get("MCP_PORT", "33041"))
 # Owner secret: accepted as Bearer credential on /mcp/ (for local scripts)
@@ -91,10 +92,51 @@ def load_json(f: Path, default):
     except Exception:
         return default
 
+try:
+    import fcntl  # POSIX advisory locks (Linux, macOS, Termux)
+    _HAS_FCNTL = True
+except Exception:
+    fcntl = None  # type: ignore
+    _HAS_FCNTL = False
+
+from contextlib import contextmanager
+
+@contextmanager
+def _file_lock(f: Path, exclusive: bool):
+    """Cross-process file lock. No-op where fcntl is unavailable."""
+    if not _HAS_FCNTL:
+        yield
+        return
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with open(f.parent / (f.name + ".lock"), "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            try:
+                yield
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+    except Exception:
+        yield  # never break serving because locking failed
+
 def save_json(f: Path, obj):
+    with _file_lock(f, exclusive=True):
+        _write_json(f, obj)
+
+def _write_json(f: Path, obj):
     tmp = f.with_suffix(".tmp")
     tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(f)
+    os.replace(tmp, f)
+
+def mutate_json(f: Path, default, fn):
+    """Atomically load, transform, save. fn(data) -> (new_data, result)."""
+    with DATA_LOCK, _file_lock(f, exclusive=True):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            data = default
+        new_data, result = fn(data)
+        _write_json(f, new_data)
+        return result
 
 # ---- dot-only primitives: inbox + scheduler ----
 # shell ทำเองไม่ได้: การฝากข้อความข้ามแชท,
@@ -102,12 +144,14 @@ def save_json(f: Path, obj):
 DATA_LOCK = threading.Lock()
 
 def inbox_push(kind: str, text: str, ref: dict | None = None) -> dict:
-    with DATA_LOCK:
-        box = load_json(INBOX_FILE, [])
+    def _add(box):
+        if not isinstance(box, list):
+            box = []
         item = {"id": uuid.uuid4().hex[:8], "ts": time.time(), "kind": kind,
                 "text": text, "ref": ref or {}, "acked": False}
-        box.append(item); save_json(INBOX_FILE, box[-300:])
-    return item
+        box.append(item)
+        return box[-300:], item
+    return mutate_json(INBOX_FILE, [], _add)
 
 def inbox_list(unacked_only: bool = True, limit: int = 20) -> dict:
     try:
@@ -122,12 +166,13 @@ def inbox_list(unacked_only: bool = True, limit: int = 20) -> dict:
 def inbox_ack(iid: str) -> dict:
     if not (iid or "").strip():
         raise ValueError("empty id: refusing to ack all (pass a real inbox id)")
-    with DATA_LOCK:
-        box = load_json(INBOX_FILE, [])
+    def _ack(box):
+        if not isinstance(box, list):
+            box = []
         for m in box:
             if m.get("id", "").startswith(iid): m["acked"] = True
-        save_json(INBOX_FILE, box)
-    return {"ok": True}
+        return box, {"ok": True}
+    return mutate_json(INBOX_FILE, [], _ack)
 
 def _shell() -> str:
     import shutil
@@ -141,9 +186,10 @@ def _sched_loop():
         try:
             time.sleep(30)
             now = time.time()
-            changed = False
-            with DATA_LOCK:
-                jobs = load_json(SCHED_FILE, [])
+            def _tick(jobs):
+                if not isinstance(jobs, list):
+                    jobs = []
+                changed = False
                 for j in jobs:
                     if not isinstance(j, dict):
                         continue
@@ -159,7 +205,8 @@ def _sched_loop():
                         cmd, cwd = j.get("command", ""), j.get("cwd", "~")
                         jid = j.get("id", "?")
                         threading.Thread(target=_sched_run, args=(jid, cmd, cwd), daemon=True).start()
-                if changed: save_json(SCHED_FILE, jobs)
+                return jobs, changed
+            mutate_json(SCHED_FILE, [], _tick)
         except Exception:
             time.sleep(30)
 
@@ -172,11 +219,13 @@ def _sched_run(jid: str, cmd: str, cwd: str):
     except Exception as e:
         inbox_push("schedule", f"[{jid}] failed: {e}", {"job_id": jid})
     try:
-        with DATA_LOCK:
-            jobs = load_json(SCHED_FILE, [])
+        def _mark(jobs):
+            if not isinstance(jobs, list):
+                jobs = []
             for j in jobs:
                 if isinstance(j, dict) and j.get("id") == jid: j["last_run"] = time.time()
-            save_json(SCHED_FILE, jobs)
+            return jobs, None
+        mutate_json(SCHED_FILE, [], _mark)
     except Exception: pass
 
 _SCHED_STARTED = False
@@ -354,12 +403,15 @@ def edit_file(path: str, match_text: str, write_text: str, mode: str = "replace_
 @srv.tool()
 def remember(note: str, tag: str = "general") -> dict:
     """Save persistent memory (dot-like notes). Survives across chats. Dedupes identical note+tag."""
-    mem = load_json(MEM_FILE, [])
-    for m in mem:
-        if m.get("note") == note and m.get("tag") == tag: return m
-    item = {"id": uuid.uuid4().hex[:8], "ts": time.time(), "tag": tag, "note": note}
-    mem.append(item); save_json(MEM_FILE, mem[-500:])
-    return item
+    def _add(mem):
+        if not isinstance(mem, list):
+            mem = []
+        for m in mem:
+            if m.get("note") == note and m.get("tag") == tag: return mem, m
+        item = {"id": uuid.uuid4().hex[:8], "ts": time.time(), "tag": tag, "note": note}
+        mem.append(item)
+        return mem[-500:], item
+    return mutate_json(MEM_FILE, [], _add)
 
 @srv.tool()
 def recall(query: str = "", tag: str = "", limit: int = 20) -> dict:
@@ -377,24 +429,32 @@ def recall(query: str = "", tag: str = "", limit: int = 20) -> dict:
 @srv.tool()
 def forget(mid: str) -> dict:
     """Delete one memory by id."""
-    mem = load_json(MEM_FILE, [])
-    mem = [m for m in mem if m.get("id") != mid]
-    save_json(MEM_FILE, mem)
-    return {"ok": True}
+    def _drop(mem):
+        if not isinstance(mem, list):
+            mem = []
+        return [m for m in mem if m.get("id") != mid], {"ok": True}
+    return mutate_json(MEM_FILE, [], _drop)
 
 @srv.tool()
 def set_goal(goal: str) -> dict:
     """Set the dot's current responsibility; progress tracked in get_state."""
-    st = load_json(STATE_FILE, {})
-    st["goal"] = goal; st["updates"] = []; st["updated"] = time.time()
-    save_json(STATE_FILE, st); return st
+    def _set(st):
+        if not isinstance(st, dict):
+            st = {}
+        st["goal"] = goal; st["updates"] = []; st["updated"] = time.time()
+        return st, st
+    return mutate_json(STATE_FILE, {}, _set)
 
 @srv.tool()
 def add_update(text: str) -> dict:
     """Append progress update (dot works between conversations)."""
-    st = load_json(STATE_FILE, {})
-    st.setdefault("updates", []).append({"ts": time.time(), "text": text})
-    st["updated"] = time.time(); save_json(STATE_FILE, st); return st
+    def _add(st):
+        if not isinstance(st, dict):
+            st = {}
+        st.setdefault("updates", []).append({"ts": time.time(), "text": text})
+        st["updated"] = time.time()
+        return st, st
+    return mutate_json(STATE_FILE, {}, _add)
 
 @srv.tool()
 def get_state() -> dict:
@@ -408,23 +468,30 @@ def get_state() -> dict:
 @srv.tool()
 def add_task(title: str, detail: str = "") -> dict:
     """Add todo task."""
-    st = load_json(STATE_FILE, {})
-    tasks = st.setdefault("tasks", [])
-    t = {"id": uuid.uuid4().hex[:8], "title": title, "detail": detail, "done": False, "ts": time.time()}
-    tasks.append(t); save_json(STATE_FILE, st); return t
+    def _add(st):
+        if not isinstance(st, dict):
+            st = {}
+        tasks = st.setdefault("tasks", [])
+        t = {"id": uuid.uuid4().hex[:8], "title": title, "detail": detail, "done": False, "ts": time.time()}
+        tasks.append(t)
+        return st, t
+    return mutate_json(STATE_FILE, {}, _add)
 
 @srv.tool()
 def complete_task(tid: str) -> dict:
     """Mark task done (prefix match on id)."""
     if not (tid or "").strip():
         raise ValueError("empty id: refusing to complete all tasks")
-    st = load_json(STATE_FILE, {})
-    matched = 0
-    for t in st.get("tasks", []):
-        if isinstance(t, dict) and t.get("id", "").startswith(tid):
-            t["done"] = True
-            matched += 1
-    save_json(STATE_FILE, st); return {"ok": True, "matched": matched}
+    def _done(st):
+        if not isinstance(st, dict):
+            st = {}
+        matched = 0
+        for t in st.get("tasks", []):
+            if isinstance(t, dict) and t.get("id", "").startswith(tid):
+                t["done"] = True
+                matched += 1
+        return st, {"ok": True, "matched": matched}
+    return mutate_json(STATE_FILE, {}, _done)
 
 @srv.tool()
 def notify_user(text: str, kind: str = "progress") -> dict:
@@ -445,13 +512,15 @@ def ack_inbox(iid: str) -> dict:
 def add_schedule(name: str, command: str, interval_seconds: int = 3600, cwd: str = "~") -> dict:
     """Recurring background job (dot proactive work). Runs even between chats, result goes to inbox."""
     if interval_seconds < 60: raise ValueError("minimum interval 60s")
-    with DATA_LOCK:
-        jobs = load_json(SCHED_FILE, [])
+    def _add(jobs):
+        if not isinstance(jobs, list):
+            jobs = []
         j = {"id": uuid.uuid4().hex[:8], "name": name, "command": command, "cwd": cwd,
              "interval_seconds": interval_seconds, "next_run": time.time() + interval_seconds,
              "paused": False, "last_run": None}
-        jobs.append(j); save_json(SCHED_FILE, jobs)
-    return j
+        jobs.append(j)
+        return jobs, j
+    return mutate_json(SCHED_FILE, [], _add)
 
 @srv.tool()
 def list_schedules() -> dict:
@@ -463,10 +532,11 @@ def remove_schedule(jid: str) -> dict:
     """Delete a background job by id prefix."""
     if not (jid or "").strip():
         raise ValueError("empty id: refusing to remove all schedules")
-    with DATA_LOCK:
-        jobs = [j for j in load_json(SCHED_FILE, []) if not (isinstance(j, dict) and j.get("id", "").startswith(jid))]
-        save_json(SCHED_FILE, jobs)
-    return {"ok": True}
+    def _drop(jobs):
+        if not isinstance(jobs, list):
+            jobs = []
+        return [j for j in jobs if not (isinstance(j, dict) and j.get("id", "").startswith(jid))], {"ok": True}
+    return mutate_json(SCHED_FILE, [], _drop)
 
 # ---- Minimal single-user OAuth 2.1 AS (DCR + PKCE) for ChatGPT/Claude/Gemini ----
 # Free, self-hosted: this server is both authorization server and resource server.
@@ -479,17 +549,29 @@ def _oauth_state() -> dict:
     st = load_json(OAUTH_FILE, {})
     if not isinstance(st, dict):
         st = {}
-    if not st.get("as_secret"):
-        st["as_secret"] = secrets.token_urlsafe(48)
-        save_json(OAUTH_FILE, st)
     st.setdefault("clients", {})
     st.setdefault("codes", {})
     st.setdefault("refresh", {})
     return st
 
+def _oauth_ensure() -> dict:
+    """Ensure as_secret + maps exist (atomic; safe at first boot)."""
+    def _mk(st):
+        if not isinstance(st, dict):
+            st = {}
+        if not st.get("as_secret"):
+            st["as_secret"] = secrets.token_urlsafe(48)
+        st.setdefault("clients", {})
+        st.setdefault("codes", {})
+        st.setdefault("refresh", {})
+        return st, st
+    return mutate_json(OAUTH_FILE, {}, _mk)
+
 def _oauth_save(st: dict) -> None:
-    with DATA_LOCK:
-        save_json(OAUTH_FILE, st)
+    save_json(OAUTH_FILE, st)
+    _oauth_chmod()
+
+def _oauth_chmod() -> None:
     try:
         os.chmod(OAUTH_FILE, 0o600)  # holds refresh tokens + client secret
     except Exception:
@@ -498,16 +580,17 @@ def _oauth_save(st: dict) -> None:
 def _oauth_static_client() -> dict:
     """Pre-provisioned confidential client for connectors with manual
     Client ID/Secret fields (no DCR). Stable per machine. Secret shown
-    by `dots start`; consent page still gates code issuance."""
-    st = _oauth_state()
-    sc = st.get("static_client")
-    if not isinstance(sc, dict) or not sc.get("client_id") or not sc.get("client_secret"):
-        sc = {"client_id": "dots-" + uuid.uuid4().hex[:8],
-              "client_secret": secrets.token_urlsafe(32),
-              "created": time.time()}
-        st["static_client"] = sc
-        _oauth_save(st)
-    return sc
+    by `dot-mcp start`; consent page still gates code issuance."""
+    _oauth_ensure()
+    def _mk(st):
+        sc = st.get("static_client")
+        if not isinstance(sc, dict) or not sc.get("client_id") or not sc.get("client_secret"):
+            sc = {"client_id": "dots-" + uuid.uuid4().hex[:8],
+                  "client_secret": secrets.token_urlsafe(32),
+                  "created": time.time()}
+            st["static_client"] = sc
+        return st, st["static_client"]
+    return mutate_json(OAUTH_FILE, {}, _mk)
 
 def _oauth_find_client(st: dict, cid: str) -> tuple[dict | None, bool]:
     """Return (record, is_static). Static client allows any https redirect (owner-only)."""
@@ -536,14 +619,13 @@ def _b64u(b: bytes) -> str:
 def _b64u_dec(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
-def _jwt_issue(client_id: str, scope: str, ttl: int = 3600) -> str:
-    st = _oauth_state()
+def _jwt_issue(secret: str, client_id: str, scope: str, ttl: int = 3600) -> str:
     now = int(time.time())
     h = _b64u(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
     p = _b64u(json.dumps({"iss": _issuer(), "aud": _resource_id(), "sub": "owner",
         "client_id": client_id, "scope": scope, "iat": now, "exp": now + ttl,
         "jti": uuid.uuid4().hex[:12]}, separators=(",", ":")).encode())
-    s = _b64u(hmac.new(st["as_secret"].encode(), f"{h}.{p}".encode(), hashlib.sha256).digest())
+    s = _b64u(hmac.new(secret.encode(), f"{h}.{p}".encode(), hashlib.sha256).digest())
     return f"{h}.{p}.{s}"
 
 def _jwt_verify(token: str) -> dict | None:
@@ -613,11 +695,15 @@ async def _oauth_register_req(req):
     uris = body.get("redirect_uris") if isinstance(body, dict) else None
     if not isinstance(uris, list) or not uris or not all(isinstance(u, str) and _valid_redirect(u) for u in uris):
         return JSONResponse({"error": "invalid_redirect_uri"}, status_code=400)
-    st = _oauth_state()
     cid = "c-" + uuid.uuid4().hex[:12]
-    st["clients"][cid] = {"redirect_uris": uris,
-        "name": str(body.get("client_name", ""))[:80], "created": time.time()}
-    _oauth_save(st)
+    def _add(st):
+        if not isinstance(st, dict):
+            st = {}
+        st.setdefault("clients", {})[cid] = {"redirect_uris": uris,
+            "name": str(body.get("client_name", ""))[:80], "created": time.time()}
+        return st, cid
+    mutate_json(OAUTH_FILE, {}, _add)
+    _oauth_chmod()
     return JSONResponse({"client_id": cid, "client_id_issued_at": int(time.time()),
         "redirect_uris": uris, "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"], "token_endpoint_auth_method": "none",
@@ -656,6 +742,16 @@ async def _oauth_authorize_req(req):
         return HTMLResponse(page)
     form = await req.form()
     g = lambda k: str(form.get(k, ""))
+    origin = req.headers.get("origin", "") or req.headers.get("referer", "")
+    if origin:
+        try:
+            from urllib.parse import urlparse
+            oh = (urlparse(origin).hostname or "").lower()
+            ih = (urlparse(_issuer()).hostname or "").lower()
+            if oh and ih and oh != ih:
+                return JSONResponse({"error": "invalid_request"}, status_code=403)
+        except Exception:
+            pass
     st = _oauth_state()
     cl, static = _oauth_find_client(st, g("client_id"))
     ruri = g("redirect_uri")
@@ -667,10 +763,17 @@ async def _oauth_authorize_req(req):
         return HTMLResponse("<h3>Wrong owner secret.</h3>", status_code=403)
     code = secrets.token_urlsafe(32)
     now = time.time()
-    st["codes"] = {k: v for k, v in st.get("codes", {}).items() if v.get("exp", 0) > now}
-    st["codes"][code] = {"client_id": g("client_id"), "redirect_uri": g("redirect_uri"),
-        "challenge": g("code_challenge"), "scope": g("scope") or OAUTH_SCOPE, "exp": now + 600}
-    _oauth_save(st)
+    def _addcode(st):
+        if not isinstance(st, dict):
+            st = {}
+        codes = st.setdefault("codes", {})
+        for k in [k for k, v in codes.items() if v.get("exp", 0) <= now]:
+            codes.pop(k, None)
+        codes[code] = {"client_id": g("client_id"), "redirect_uri": g("redirect_uri"),
+            "challenge": g("code_challenge"), "scope": g("scope") or OAUTH_SCOPE, "exp": now + 600}
+        return st, None
+    mutate_json(OAUTH_FILE, {}, _addcode)
+    _oauth_chmod()
     sep = "&" if "?" in g("redirect_uri") else "?"
     params = {"code": code}
     if g("state"):
@@ -684,80 +787,96 @@ async def _oauth_token_req(req):
     except Exception:
         return JSONResponse({"error": "invalid_request"}, status_code=400)
     g = lambda k: str(form.get(k, ""))
-    st = _oauth_state()
     now = time.time()
+    presented = g("client_secret")
+    if not presented:
+        auth = req.headers.get("authorization", "")
+        if auth.lower().startswith("basic "):
+            try:
+                presented = base64.b64decode(auth[6:].strip()).decode().partition(":")[2]
+            except Exception:
+                presented = ""
 
-    def _client_ok(cid: str) -> str | None:
+    def _client_ok(st: dict, cid: str) -> str | None:
         """Verify client for token use. Returns 'static' | 'public' | None (reject)."""
         rec, static = _oauth_find_client(st, cid)
         if not rec:
             return None
         if not static:
             return "public"  # DCR public client: PKCE is the credential
-        presented = g("client_secret")
-        if not presented:
-            auth = req.headers.get("authorization", "")
-            if auth.lower().startswith("basic "):
-                try:
-                    presented = base64.b64decode(auth[6:].strip()).decode().partition(":")[2]
-                except Exception:
-                    presented = ""
         if presented and hmac.compare_digest(presented, str(rec.get("client_secret", ""))):
             return "static"
         return None
 
-    def _pkce_ok(rec: dict) -> bool:
+    def _pkce_ok(rec: dict, verifier: str) -> bool:
         chal = rec.get("challenge") or ""
         if not chal:
             return True  # manual confidential client without PKCE
         try:
-            digest = _b64u(hashlib.sha256(g("code_verifier").encode()).digest())
+            digest = _b64u(hashlib.sha256(verifier.encode()).digest())
         except Exception:
             return False
         return bool(digest) and hmac.compare_digest(digest, chal)
 
+    def _prune_refresh(st: dict, now_: float) -> dict:
+        refresh = st.setdefault("refresh", {})
+        for k in [k for k, v in refresh.items() if v.get("exp", 0) <= now_]:
+            refresh.pop(k, None)
+        return refresh
+
     if g("grant_type") == "authorization_code":
-        rec = st.get("codes", {}).pop(g("code"), None)
-        if not rec or rec.get("exp", 0) < now:
-            _oauth_save(st)
-            return JSONResponse({"error": "invalid_grant"}, status_code=400)
-        if g("redirect_uri") != rec.get("redirect_uri"):
-            _oauth_save(st)
-            return JSONResponse({"error": "invalid_grant"}, status_code=400)
-        kind = _client_ok(rec.get("client_id", ""))
-        if kind is None:
-            _oauth_save(st)
-            return JSONResponse({"error": "invalid_client"}, status_code=401)
-        if not _pkce_ok(rec):
-            _oauth_save(st)
-            return JSONResponse({"error": "invalid_grant"}, status_code=400)
-        cid, scope = rec.get("client_id", ""), rec.get("scope") or OAUTH_SCOPE
-        ref = secrets.token_urlsafe(32)
-        st["refresh"] = {k: v for k, v in st.get("refresh", {}).items() if v.get("exp", 0) > now}
-        st["refresh"][hashlib.sha256(ref.encode()).hexdigest()] = {
-            "client_id": cid, "scope": scope, "exp": now + 30 * 86400}
-        _oauth_save(st)
-        return JSONResponse({"access_token": _jwt_issue(cid, scope), "token_type": "Bearer",
-            "expires_in": 3600, "scope": scope, "refresh_token": ref})
+        code_in, ruri_in, verifier = g("code"), g("redirect_uri"), g("code_verifier")
+        def _exchange(st):
+            if not isinstance(st, dict):
+                st = {}
+            rec = st.setdefault("codes", {}).pop(code_in, None)
+            if not rec or rec.get("exp", 0) < now:
+                return st, ("invalid_grant", 400, None)
+            if ruri_in != rec.get("redirect_uri"):
+                return st, ("invalid_grant", 400, None)
+            if _client_ok(st, rec.get("client_id", "")) is None:
+                return st, ("invalid_client", 401, None)
+            if not _pkce_ok(rec, verifier):
+                return st, ("invalid_grant", 400, None)
+            cid, scope = rec.get("client_id", ""), rec.get("scope") or OAUTH_SCOPE
+            ref = secrets.token_urlsafe(32)
+            _prune_refresh(st, now)[hashlib.sha256(ref.encode()).hexdigest()] = {
+                "client_id": cid, "scope": scope, "exp": now + 30 * 86400}
+            access = _jwt_issue(st.get("as_secret", ""), cid, scope)
+            return st, (None, 200, {"access_token": access, "token_type": "Bearer",
+                "expires_in": 3600, "scope": scope, "refresh_token": ref})
+        _, out = mutate_json(OAUTH_FILE, {}, _exchange)
+        _oauth_chmod()
+        err, status, payload = out
+        if err:
+            return JSONResponse({"error": err}, status_code=status)
+        return JSONResponse(payload)
     if g("grant_type") == "refresh_token":
-        key = hashlib.sha256(g("refresh_token").encode()).hexdigest() if g("refresh_token") else ""
-        rec = st.get("refresh", {}).pop(key, None)
-        if not rec or rec.get("exp", 0) < now:
-            _oauth_save(st)
-            return JSONResponse({"error": "invalid_grant"}, status_code=400)
-        if g("client_id") and g("client_id") != rec.get("client_id", ""):
-            _oauth_save(st)
-            return JSONResponse({"error": "invalid_grant"}, status_code=400)
-        if _client_ok(rec.get("client_id", "")) is None:
-            _oauth_save(st)
-            return JSONResponse({"error": "invalid_client"}, status_code=401)
-        cid, scope = rec.get("client_id", ""), rec.get("scope") or OAUTH_SCOPE
-        ref = secrets.token_urlsafe(32)
-        st["refresh"][hashlib.sha256(ref.encode()).hexdigest()] = {
-            "client_id": cid, "scope": scope, "exp": now + 30 * 86400}
-        _oauth_save(st)
-        return JSONResponse({"access_token": _jwt_issue(cid, scope), "token_type": "Bearer",
-            "expires_in": 3600, "scope": scope, "refresh_token": ref})
+        ref_in, cid_in = g("refresh_token"), g("client_id")
+        def _rotate(st):
+            if not isinstance(st, dict):
+                st = {}
+            key = hashlib.sha256(ref_in.encode()).hexdigest() if ref_in else ""
+            rec = st.setdefault("refresh", {}).pop(key, None)
+            if not rec or rec.get("exp", 0) < now:
+                return st, ("invalid_grant", 400, None)
+            if cid_in and cid_in != rec.get("client_id", ""):
+                return st, ("invalid_grant", 400, None)
+            if _client_ok(st, rec.get("client_id", "")) is None:
+                return st, ("invalid_client", 401, None)
+            cid, scope = rec.get("client_id", ""), rec.get("scope") or OAUTH_SCOPE
+            ref = secrets.token_urlsafe(32)
+            _prune_refresh(st, now)[hashlib.sha256(ref.encode()).hexdigest()] = {
+                "client_id": cid, "scope": scope, "exp": now + 30 * 86400}
+            access = _jwt_issue(st.get("as_secret", ""), cid, scope)
+            return st, (None, 200, {"access_token": access, "token_type": "Bearer",
+                "expires_in": 3600, "scope": scope, "refresh_token": ref})
+        _, out = mutate_json(OAUTH_FILE, {}, _rotate)
+        _oauth_chmod()
+        err, status, payload = out
+        if err:
+            return JSONResponse({"error": err}, status_code=status)
+        return JSONResponse(payload)
     return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 
 # ---- Optional Codex-inspired embedded workspace UI (MCP Apps / v2 SDK) ----
@@ -809,6 +928,37 @@ else:
     # Older MCP SDKs: text-only fallback with the canonical name.
     srv.tool(name="open_workspace")(open_workspace)
 
+# ---- Rate limiting + audit log (per-process, in-memory buckets) ----
+RATE_MCP_PER_MIN = int(os.environ.get("MCP_RATE_MCP_PER_MIN", "300"))
+RATE_AUTH_PER_MIN = int(os.environ.get("MCP_RATE_AUTH_PER_MIN", "30"))
+_RATE: dict[tuple[str, str], list[float]] = {}
+_RATE_LOCK = threading.Lock()
+
+def _rate_ok(bucket: str, ip: str, limit: int) -> bool:
+    now = time.time()
+    key = (bucket, ip)
+    with _RATE_LOCK:
+        hits = [t for t in _RATE.get(key, []) if now - t < 60]
+        if len(hits) >= max(1, limit):
+            _RATE[key] = hits
+            return False
+        hits.append(now)
+        _RATE[key] = hits
+        if len(_RATE) > 5000:  # bound memory: drop idle buckets
+            for k in [k for k, v in _RATE.items() if not v or now - v[-1] > 300]:
+                _RATE.pop(k, None)
+        return True
+
+def _audit(ip: str, method: str, path: str, status: int, tool: str = "", ms: int = 0):
+    try:
+        line = json.dumps({"ts": time.time(), "ip": ip, "method": method,
+                           "path": path, "status": status, "tool": tool,
+                           "ms": ms}, ensure_ascii=False)
+        with open(AUDIT_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] in ("--list-tools", "--check"):
@@ -859,13 +1009,38 @@ if __name__ == "__main__":
     from starlette.middleware.base import BaseHTTPMiddleware
     class OAuthBearer(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            if request.url.path.startswith("/mcp"):
+            t0 = time.time()
+            path = request.url.path
+            ip = request.client.host if request.client else "?"
+            tool = ""
+            if path.startswith("/mcp"):
+                if not _rate_ok("mcp", ip, RATE_MCP_PER_MIN):
+                    _audit(ip, request.method, path, 429, "", 0)
+                    return JSONResponse({"error": "rate_limited"}, status_code=429)
+                if request.method == "POST":
+                    try:
+                        payload = json.loads(await request.body())
+                        if isinstance(payload, dict) and payload.get("method") == "tools/call":
+                            tool = str((payload.get("params") or {}).get("name", ""))[:64]
+                    except Exception:
+                        pass
                 got = request.headers.get("authorization", "")
                 token = got[7:].strip() if got.lower().startswith("bearer ") else ""
                 ok = bool(token) and hmac.compare_digest(token, SECRET)
                 if not ok and not (token and _jwt_verify(token)):
+                    _audit(ip, request.method, path, 401, tool, int((time.time() - t0) * 1000))
                     return JSONResponse({"error": "unauthorized"}, status_code=401)
-            return await call_next(request)
+            elif path in ("/authorize", "/token", "/register") and request.method == "POST":
+                if not _rate_ok("auth", ip, RATE_AUTH_PER_MIN):
+                    _audit(ip, request.method, path, 429, "", 0)
+                    return JSONResponse({"error": "rate_limited"}, status_code=429)
+            try:
+                resp = await call_next(request)
+            except Exception:
+                _audit(ip, request.method, path, 500, tool, int((time.time() - t0) * 1000))
+                raise
+            _audit(ip, request.method, path, resp.status_code, tool, int((time.time() - t0) * 1000))
+            return resp
     OAuthBearer.__name__ = "OAuthBearer"
     app.add_middleware(OAuthBearer)
     import uvicorn

@@ -25,3 +25,6 @@ dist/
 build/
 src/*.egg-info/
 *.egg-info
+
+# third-party agent state (not source)
+.freebuff/
