@@ -5,7 +5,7 @@
 #   ./expose.sh
 #
 # The SSH key is generated once and stored in ~/.config/dot-mcp.
-# NOTE: OPEN-ACCESS MODE — no token. Anyone with the URL gets full shell.
+# Bearer/OAuth authentication is required; keep credentials private.
 #
 # Stable ngrok URL (one-time setup in your shell environment):
 #   export TUNNEL_PROVIDER=ngrok
@@ -51,6 +51,21 @@ if [[ ! -x .venv/bin/python ]]; then
   exit 1
 fi
 
+# Serialize startup with the CLI and other instances of this script.
+mkdir -p logs
+exec 9>logs/instance.lock
+flock -n 9 || { echo "another start/stop operation is in progress" >&2; exit 1; }
+stop_owned_tunnel() {
+  PYTHONPATH="$(pwd)/src" .venv/bin/python -c 'from pathlib import Path; from dot_mcp.lifecycle import stop; stop(Path("logs/tunnel.json"))'
+}
+record_tunnel() {
+  PYTHONPATH="$(pwd)/src" .venv/bin/python -c 'import sys; from pathlib import Path; from dot_mcp.lifecycle import record; record(Path("logs/tunnel.json"), int(sys.argv[1]))' "$1"
+}
+cleanup_failed_start() {
+  PYTHONPATH="$(pwd)/src" .venv/bin/python -c 'from pathlib import Path; from dot_mcp.lifecycle import stop; stop(Path("logs/server.json")); stop(Path("logs/tunnel.json"))'
+}
+trap 'code=$?; if (( code != 0 )); then cleanup_failed_start; fi' EXIT
+
 # Owner secret: stable per machine (persisted 0600; env wins if exported).
 # Local scripts + OAuth consent share it; OAuth login tokens live separately in oauth.json.
 STATE_DIR="${DOT_MCP_STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/dot-mcp}"
@@ -72,12 +87,22 @@ export MCP_PORT="$PORT"
 touch mcp.log tunnel.log
 chmod 600 mcp.log tunnel.log 2>/dev/null || true
 
+# Never adopt a server started by another instance or an unrelated process.
+if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+  PYTHONPATH="$(pwd)/src" .venv/bin/python -c 'from pathlib import Path; from dot_mcp.lifecycle import owned; import sys; sys.exit(0 if owned(Path("logs/server.json")) else 1)' || {
+    echo "port already has an unowned server; stop it yourself before exposing it" >&2
+    trap - EXIT
+    exit 1
+  }
+fi
 # Start local MCP server if it is not already healthy.
 health="$(curl -fsS --max-time 3 "http://127.0.0.1:$PORT/health" 2>/dev/null || true)"
 if ! grep -q '"tools"' <<<"$health"; then
-  pkill -f '[d]ot_mcp\.py' 2>/dev/null || true
+  PYTHONPATH="$(pwd)/src" .venv/bin/python -c 'from pathlib import Path; from dot_mcp.lifecycle import stop; stop(Path("logs/server.json"))'
   sleep 1
-  nohup env PYTHONPATH="$(pwd)/src" .venv/bin/python -m dot_mcp.server > mcp.log 2>&1 &
+  nohup env PYTHONPATH="$(pwd)/src" .venv/bin/python -m dot_mcp.server > mcp.log 2>&1 9>&- &
+  SERVER_PID=$!
+  PYTHONPATH="$(pwd)/src" .venv/bin/python -c 'import sys; from pathlib import Path; from dot_mcp.lifecycle import record; record(Path("logs/server.json"), int(sys.argv[1]))' "$SERVER_PID"
   for _ in $(seq 1 20); do
     health="$(curl -fsS --max-time 2 "http://127.0.0.1:$PORT/health" 2>/dev/null || true)"
     grep -q '"tools"' <<<"$health" && break
@@ -91,6 +116,7 @@ if ! grep -q '"tools"' <<<"$health"; then
 fi
 
 # Start selected tunnel.
+stop_owned_tunnel
 if [[ "$PROVIDER" == "ngrok" ]]; then
   if command -v ngrok >/dev/null 2>&1; then
     NGROK_BIN="$(command -v ngrok)"
@@ -101,8 +127,9 @@ if [[ "$PROVIDER" == "ngrok" ]]; then
     echo "On Android/Termux, a Linux ngrok binary may not run directly; check compatibility." >&2
     exit 1
   fi
-  pkill -f '[n]grok http' 2>/dev/null || true
-  nohup "$NGROK_BIN" http "http://127.0.0.1:$PORT" --url="$NGROK_DOMAIN" --authtoken="$NGROK_AUTHTOKEN" > tunnel.log 2>&1 &
+  stop_owned_tunnel
+  nohup "$NGROK_BIN" http "http://127.0.0.1:$PORT" --url="$NGROK_DOMAIN" --authtoken="$NGROK_AUTHTOKEN" > tunnel.log 2>&1 9>&- &
+  record_tunnel "$!"
   URL="https://$NGROK_DOMAIN"
   for _ in $(seq 1 30); do
     if curl -fsS --max-time 2 "$URL/health" >/dev/null 2>&1; then break; fi
@@ -127,19 +154,17 @@ elif [[ "$PROVIDER" == "tunnl" ]]; then
     chmod 644 "$KEY_FILE.pub"
     echo "Created persistent tunnl.gg SSH key at $KEY_FILE"
   fi
-  if [[ -s logs/tunnl.pid ]]; then
-    OLD_PID="$(cat logs/tunnl.pid)"
-    if [[ "$OLD_PID" =~ ^[0-9]+$ ]] && kill -0 "$OLD_PID" 2>/dev/null; then kill "$OLD_PID" 2>/dev/null || true; fi
-  fi
+  PYTHONPATH="$(pwd)/src" .venv/bin/python -c 'from pathlib import Path; from dot_mcp.lifecycle import stop; stop(Path("logs/tunnel.json"))'
   : > tunnel.log
   nohup ssh -tt -i "$KEY_FILE" -o IdentitiesOnly=yes \
     -o StrictHostKeyChecking=accept-new \
     -o ServerAliveInterval=20 \
     -o ServerAliveCountMax=3 \
     -R "80:127.0.0.1:$PORT" stable@proxy.tunnl.gg \
-    > tunnel.log 2>&1 </dev/null &
+    > tunnel.log 2>&1 </dev/null 9>&- &
   TUNNEL_PID=$!
   echo "$TUNNEL_PID" > logs/tunnl.pid
+  PYTHONPATH="$(pwd)/src" .venv/bin/python -c 'import sys; from pathlib import Path; from dot_mcp.lifecycle import record; record(Path("logs/tunnel.json"), int(sys.argv[1]))' "$TUNNEL_PID"
   URL=""
   for _ in $(seq 1 35); do
     if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
@@ -168,8 +193,9 @@ elif [[ "$PROVIDER" == "serveo" ]]; then
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
     -R "$SERVEO_SUBDOMAIN:80:127.0.0.1:$PORT" serveo.net \
-    > tunnel.log 2>&1 &
+    > tunnel.log 2>&1 9>&- &
   TUNNEL_PID=$!
+  record_tunnel "$TUNNEL_PID"
   echo "$TUNNEL_PID" > logs/serveo.pid
   # Wait for DNS/HTTPS to come up. Final MCP initialize below is authoritative.
   for _ in $(seq 1 30); do
@@ -199,8 +225,9 @@ else
     fi
     chmod +x "$CF"
   fi
-  pkill -f '[c]loudflared tunnel' 2>/dev/null || true
-  nohup "$CF" tunnel --url "http://127.0.0.1:$PORT" > tunnel.log 2>&1 &
+  stop_owned_tunnel
+  nohup "$CF" tunnel --url "http://127.0.0.1:$PORT" > tunnel.log 2>&1 9>&- &
+  record_tunnel "$!"
   URL=""
   for _ in $(seq 1 45); do
     URL="$(grep -oE 'https://[A-Za-z0-9-]+\.trycloudflare\.com' tunnel.log 2>/dev/null | head -1 || true)"
@@ -217,9 +244,11 @@ fi
 HOST_ONLY="${URL#https://}"
 export MCP_PUBLIC_HOST="$HOST_ONLY"
 # Restart server so DNS-rebinding protection allows the public tunnel hostname.
-pkill -f '[d]ot_mcp\.py' 2>/dev/null || true
+PYTHONPATH="$(pwd)/src" .venv/bin/python -c 'from pathlib import Path; from dot_mcp.lifecycle import stop; stop(Path("logs/server.json"))'
 sleep 1
-nohup env PYTHONPATH="$(pwd)/src" .venv/bin/python -m dot_mcp.server > mcp.log 2>&1 &
+nohup env PYTHONPATH="$(pwd)/src" .venv/bin/python -m dot_mcp.server > mcp.log 2>&1 9>&- &
+SERVER_PID=$!
+PYTHONPATH="$(pwd)/src" .venv/bin/python -c 'import sys; from pathlib import Path; from dot_mcp.lifecycle import record; record(Path("logs/server.json"), int(sys.argv[1]))' "$SERVER_PID"
 sleep 3
 
 # Verify the public endpoint using MCP initialize, not only /health.
@@ -262,3 +291,5 @@ else
 fi
 echo "============================================="
 echo "Keep this process running while using the connector."
+
+trap - EXIT

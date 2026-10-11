@@ -5,7 +5,8 @@
 set -u
 ENDPOINT="${1:-http://127.0.0.1:33041/mcp/}"
 BASE="${ENDPOINT%%/mcp*}"
-SECRET="${MCP_PATH_SECRET:-$(cat "${XDG_CONFIG_HOME:-$HOME/.config}/dot-mcp/path_secret" 2>/dev/null || true)}"
+STATE_DIR="${DOT_MCP_STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/dot-mcp}"
+SECRET="${MCP_PATH_SECRET:-$(cat "$STATE_DIR/owner_secret" 2>/dev/null || cat "$STATE_DIR/path_secret" 2>/dev/null || true)}"
 echo "== health =="
 curl -s --max-time 5 "$BASE/health"; echo
 echo "== initialize =="

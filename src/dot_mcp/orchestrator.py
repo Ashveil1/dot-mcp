@@ -28,6 +28,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from dot_mcp import lifecycle
 
 DOTS_VERSION = "0.3.0"
 SECRET_MASK_KEEP = 4  # show first 4 + last 3 chars when masked
@@ -193,10 +194,16 @@ def _boot_server(py: str, env: dict, repo: Path, logfile: Path,
         out = fh
     else:
         out = subprocess.PIPE
-    return subprocess.Popen(
-        [py, "-m", "dot_mcp.server"], cwd=str(repo), env=env,
-        stdout=out, stderr=subprocess.STDOUT if not pipe_out else subprocess.STDOUT,
-        stdin=subprocess.DEVNULL, start_new_session=True)
+    try:
+        proc = subprocess.Popen(
+            [py, "-m", "dot_mcp.server"], cwd=str(repo), env=env,
+            stdout=out, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+        lifecycle.record(repo / "logs" / "server.json", proc.pid)
+        return proc
+    finally:
+        if not pipe_out:
+            fh.close()
 
 
 def _wait_health(port: int, timeout: int = 25) -> bool:
@@ -234,15 +241,7 @@ _TUNNL_RE = re.compile(r"https://[a-z-]+-[a-f0-9]+\.tunnl\.gg")
 
 def _start_tunnl(repo: Path, port: int, key: Path):
     pidfile = repo / "logs" / "tunnl.pid"
-    try:
-        old = int(pidfile.read_text().strip())
-        try:
-            os.kill(old, 0)
-            os.kill(old, 9)
-        except Exception:
-            pass
-    except Exception:
-        pass
+    lifecycle.stop(repo / "logs" / "tunnel.json")
     log = repo / "tunnel.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "wb"):
@@ -257,12 +256,15 @@ def _start_tunnl(repo: Path, port: int, key: Path):
          "-o", "StrictHostKeyChecking=accept-new", "-o", "ServerAliveInterval=20",
          "-o", "ServerAliveCountMax=3", "-R", f"80:127.0.0.1:{port}", "stable@proxy.tunnl.gg"],
         stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+    fh.close()
+    lifecycle.record(repo / "logs" / "tunnel.json", proc.pid)
     pidfile.parent.mkdir(parents=True, exist_ok=True)
     pidfile.write_text(str(proc.pid))
     url = ""
     end = time.time() + 45
     while time.time() < end:
         if proc.poll() is not None:
+            _kill_tunnel(repo)
             raise RuntimeError("tunnel died — see tunnel.log: " + log.read_text()[-500:])
         m = _TUNNL_RE.search(log.read_text(errors="replace"))
         if m:
@@ -270,7 +272,8 @@ def _start_tunnl(repo: Path, port: int, key: Path):
             break
         time.sleep(1)
     if not url:
-        proc.kill()
+        _kill_proc(proc)
+        _kill_tunnel(repo)
         raise RuntimeError("could not read URL from tunnel — see tunnel.log")
     return url
 
@@ -566,6 +569,20 @@ def run_flow(ctx: StartCtx, state_dir: Path, live=None) -> FlowResult:
 
 
 def plain_flow(ctx: StartCtx, state_dir: Path, console, leave_running: bool = False) -> FlowResult:
+    """Clean up verified owned children on every failed startup path."""
+    try:
+        result = _plain_flow(ctx, state_dir, console, leave_running)
+    except Exception:
+        lifecycle.stop(ctx.repo / "logs" / "server.json")
+        _kill_tunnel(ctx.repo)
+        raise
+    if not result.ok:
+        lifecycle.stop(ctx.repo / "logs" / "server.json")
+        _kill_tunnel(ctx.repo)
+    return result
+
+
+def _plain_flow(ctx: StartCtx, state_dir: Path, console, leave_running: bool = False) -> FlowResult:
     """Non-TTY sequential output (same phases, no Live).
 
     Default: the verified server is stopped so the caller can exec it.
@@ -723,27 +740,12 @@ def interactive(ctx: StartCtx, state_dir: Path) -> int:
     os._exit(0)  # child was SIGKILLed; exit now instead of joining the tee thread
 
 def _tunnel_alive(repo: Path) -> bool:
-    try:
-        pid = int((repo / "logs" / "tunnl.pid").read_text().strip())
-        os.kill(pid, 0)
-        return True
-    except Exception:
-        return False
+    return lifecycle.owned(repo / "logs" / "tunnel.json") is not None
 
 
 def _kill_tunnel(repo: Path) -> None:
-    try:
-        pid = int((repo / "logs" / "tunnl.pid").read_text().strip())
-        try:
-            os.kill(pid, _sig.SIGTERM)
-        except Exception:
-            pass
-        try:
-            (repo / "logs" / "tunnl.pid").unlink()
-        except Exception:
-            pass
-    except Exception:
-        pass
+    lifecycle.stop(repo / "logs" / "tunnel.json")
+    (repo / "logs" / "tunnl.pid").unlink(missing_ok=True)
 
 
 def _screen_setup() -> bool:
