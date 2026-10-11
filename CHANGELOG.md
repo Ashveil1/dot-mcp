@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.1.0 — production hardening (unreleased, on `main` ahead of PyPI)
+## 0.1.1
+- README rewritten in English (install + usage, 22 tools, OAuth, security model)
+- `dots start` output slimmed: Public URL / OAuth issuer / IDs / owner secret only
+- OAuth consent strips pasted whitespace; SDK log spam silenced
+
+## 0.1.0 — production hardening
 
 **Distribution**
 - Restructured to `src/dot_mcp` package (`pip install dot-mcp`)
