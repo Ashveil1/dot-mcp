@@ -8,6 +8,7 @@ import asyncio
 import base64
 import concurrent.futures
 import json
+import importlib.util
 import os
 from pathlib import Path
 import secrets
@@ -32,6 +33,25 @@ def browser_executable():
         if found:
             return found
     return None
+
+def browser_dependencies():
+    """Read-only checks in the server interpreter; no installers or subprocesses."""
+    missing = []
+    for package in ("playwright", "websockets"):
+        if importlib.util.find_spec(package) is None:
+            missing.append(package)
+    executable = browser_executable()
+    if executable and not (Path(executable).is_file() and os.access(executable, os.X_OK)):
+        missing.append("configured Chrome/Chromium executable")
+    return {"missing": missing, "executable": executable}
+
+
+def not_installed(missing):
+    """An actionable tool result, not permission to install anything."""
+    return {"ok": False, "error": "not_installed", "missing": missing,
+            "message": "not installed: " + ", ".join(missing),
+            "next_action": "Ask the user whether to install or configure the missing dependencies. Do not install without user approval."}
+
 
 class BrowserError(ValueError):
     pass
@@ -114,22 +134,31 @@ class LocalBrowser:
         self._url(url)
         if self.context:
             raise BrowserError("browser already open; navigate or close it first")
+        dependencies = browser_dependencies()
+        if dependencies["missing"]:
+            return not_installed(dependencies["missing"])
         try:
             from playwright.async_api import async_playwright
         except ImportError:
-            raise BrowserError("install optional browser extra and Chromium: pip install 'dot-mcp[browser]'; python -m playwright install chromium") from None
+            raise BrowserError("playwright is installed but cannot import; check the server's Python environment. No installation attempted.") from None
         for p in (self.profile, self.shots):
             p.mkdir(parents=True, exist_ok=True)
             p.chmod(0o700)
-        self.playwright = await async_playwright().start()
         try:
+            self.playwright = await async_playwright().start()
+            executable = dependencies["executable"]
+            if executable is None:
+                managed = Path(self.playwright.chromium.executable_path)
+                if not managed.is_file() or not os.access(managed, os.X_OK):
+                    await self._close()
+                    return not_installed(["Chrome/Chromium (PATH or Playwright-managed)"])
             # Chromium's Unix socket path is limited; a deeply nested TMPDIR can
             # abort launch. Prefer a short private system-temp directory.
             temp_root = "/tmp" if os.path.isdir("/tmp") and os.access("/tmp", os.W_OK) else None
             self.browser_tmp = tempfile.TemporaryDirectory(prefix="dmcb-", dir=temp_root)
             browser_env = dict(os.environ, TMPDIR=self.browser_tmp.name)
             self.context = await self.playwright.chromium.launch_persistent_context(
-                str(self.profile), env=browser_env, headless=headless, executable_path=browser_executable(),
+                str(self.profile), env=browser_env, headless=headless, executable_path=executable,
                 chromium_sandbox=True, accept_downloads=False, viewport={"width": 1280, "height": 720},
                 service_workers="block")
             self.context.set_default_timeout(10000)

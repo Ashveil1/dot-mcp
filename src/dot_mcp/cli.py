@@ -209,8 +209,9 @@ def cmd_doctor(args):
     for name in ("mcp", "uvicorn", "playwright", "cryptography", "websockets"):
         try: report["packages"][name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError: report["packages"][name] = "not installed"
-    from dot_mcp.browser import browser_executable
+    from dot_mcp.browser import browser_executable, browser_dependencies
     report["optional"]["browser_executable"] = browser_executable() or "Playwright-managed (not verified)"
+    report["optional"]["browser_missing"] = browser_dependencies()["missing"]
     report["vault"] = "locked by default; human start --vault or vault serve required"
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{args.port or DEFAULT_PORT}/health", timeout=3) as r:
@@ -229,6 +230,7 @@ def cmd_doctor(args):
         table.add_row("Source", src or "installed package")
         for name, value in report["packages"].items(): table.add_row(name, value)
         table.add_row("Browser executable", str(report["optional"]["browser_executable"]))
+        table.add_row("Missing browser packages/executable", ", ".join(report["optional"]["browser_missing"]) or "none found; managed browser/launch not verified")
         table.add_row("Running tool count", str(report["running"]["tools"] or "server unavailable"))
         table.add_row("Vault", report["vault"])
         console.print(Panel(table, title="dot-mcp doctor", border_style=ACCENT))

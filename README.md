@@ -512,3 +512,26 @@ that choice on stderr. The passphrase is never an argument, chat message or
 environment value. Missing/uninitialized vault is a human setup step, not an
 automatic empty-vault creation. Idle auto-lock, exact origins, privacy mode and
 same-user shell limitations are unchanged.
+
+### Missing browser dependencies
+
+`browser_open` checks the running server's Python for Playwright and websockets,
+then selects installed PATH Chrome/Chromium or Playwright-managed Chromium.
+An explicit executable override is checked for an executable file. With neither
+an installed browser nor a managed browser, it reports the browser as missing.
+
+Missing dependencies return a tool result such as:
+
+```json
+{"ok": false, "error": "not_installed", "missing": ["playwright", "websockets"], "message": "not installed: playwright, websockets", "next_action": "Ask the user whether to install or configure the missing dependencies. Do not install without user approval."}
+```
+
+The tool does not run pip, a package manager or a browser installer. The AI must
+ask before installing. These checks are rerun on each new `browser_open` attempt;
+after approved installation, restart the server if its environment changed.
+`dots doctor --json` includes `optional.browser_missing` for packages and an
+explicit/PATH executable; it does not start Playwright to check its managed
+browser. Installed-but-broken imports, missing system libraries, display or
+sandbox failures are runtime failures, not proof that Chrome is absent. No
+sandbox downgrade or automatic dependency fix is attempted. Vault startup is
+unchanged.

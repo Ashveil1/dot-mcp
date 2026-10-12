@@ -661,7 +661,7 @@ def _browser_call(action, **args):
 
 @srv.tool()
 def browser_open(url: str = "https://example.com", headless: bool = True) -> dict:
-    """Open the dedicated local profile. Give people live_view_url; only intended controllers get live_control_url. No secrets in chat."""
+    """Open dedicated profile. If not_installed, ask user before installing missing dependencies. No automatic install. Give live_view_url; control URL only to intended controllers. No secrets in chat."""
     return _browser_call("open", url=url, headless=headless)
 
 @srv.tool()

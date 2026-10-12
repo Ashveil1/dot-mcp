@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Return clear not_installed browser dependency results; ask before installing, never install silently
+- Check server-interpreter Playwright/websockets and executable availability, with managed Chromium fallback
+
 
 ### Installed browser and explicit vault startup
 - Prefer installed PATH Chrome/Chromium with explicit executable override and dedicated profile
