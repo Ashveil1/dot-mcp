@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+- Fix browser OAuth consent failing with Origin: null by using a same-origin referrer policy; keep strict origin checks and suppress cross-origin Referer
+- Accept bare loopback Host headers and the configured public HTTPS host with or without :443; keep DNS-rebinding protection enabled and reject unlisted hosts
+- Synchronize the package __version__ with the release version
+
 ## 0.2.0
 
 ### Stable one-command startup and vault convenience

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dot-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Personal MCP agent: shell, files, memory, goals, inbox, scheduler, capability URL + self-hosted OAuth"
 readme = "README.md"
 license = { text = "MIT" }
