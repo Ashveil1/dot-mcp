@@ -1,3 +1,3 @@
 """dot-mcp: single-file personal MCP agent with shell, files, memory,
 goals, inbox, scheduler, capability URL + self-hosted OAuth."""
-__version__ = "0.2.2"
+__version__ = "0.2.3"
