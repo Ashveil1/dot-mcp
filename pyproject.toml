@@ -32,6 +32,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx"]
+vault = ["cryptography>=44,<47"]
+browser = ["playwright>=1.50,<2", "websockets>=13,<17"]
 
 [project.urls]
 Homepage = "https://github.com/Ashveil1/dot-mcp"

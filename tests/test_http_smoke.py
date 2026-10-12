@@ -26,7 +26,7 @@ def test_production_app_auth_and_mcp_initialize(tmp_path):
         for _ in range(100):
             try:
                 with urlopen(base + "/health", timeout=0.2) as r:
-                    assert json.load(r)["tools"] == 33
+                    assert json.load(r)["tools"] == 45
                 break
             except OSError:
                 if child.poll() is not None:
@@ -40,6 +40,9 @@ def test_production_app_auth_and_mcp_initialize(tmp_path):
             assert error.code == 401
         else:
             raise AssertionError("missing bearer header was accepted")
+        with urlopen(base + "/live", timeout=2) as live:
+            assert b'Owner token (required on every visit)' in live.read()
+            assert live.headers['Cache-Control'] == 'no-store'
         request = Request(base + "/mcp/", method="POST", headers={
             "Authorization": "Bearer isolated-test-secret",
             "Content-Type": "application/json", "Accept": "application/json, text/event-stream",

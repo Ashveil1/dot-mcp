@@ -100,7 +100,7 @@ def mask(secret: str) -> str:
     dots = "…" if UNI else "..."
     if len(secret) <= SECRET_MASK_KEEP + 3:
         return "•" * len(secret)
-    return f"{secret[:SECRET_MASK_KEEP]}{dots}{secret[-3:]}"
+    return "hidden"
 
 
 # ---------------------------------------------------------------- clipboard
@@ -635,8 +635,7 @@ def json_result(ok: bool, ctx: StartCtx, res: FlowResult, oauth: dict) -> str:
         "local": f"http://127.0.0.1:{ctx.port}/mcp/",
         "issuer": f"https://{res.host}" if ok else "",
         "client_id": oauth.get("client_id", ""),
-        "client_secret": oauth.get("client_secret", ""),
-        "owner_secret": ctx.secret,
+        "credentials_hidden": True,
         "port": ctx.port,
         "reason": res.reason,
     }, indent=2)
