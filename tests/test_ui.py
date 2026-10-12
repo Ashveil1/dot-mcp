@@ -1,5 +1,6 @@
 import argparse
 import json
+import pytest
 from dot_mcp import cli,orchestrator
 from dot_mcp.web_ui import authorize,HEADERS
 
@@ -49,3 +50,32 @@ def test_consent_csp_allows_only_validated_callback_origin():
     assert '*' not in policy
     for target in ('http://evil.test/cb','https://user:pass@evil.test/cb','javascript:alert(1)'):
         with pytest.raises(ValueError):consent_headers(target)
+
+
+def test_start_vault_foreground_no_secret_handoff(tmp_path,monkeypatch):
+    monkeypatch.setattr('sys.stdin.isatty',lambda:True)
+    monkeypatch.setenv('MCP_PORT','33041')
+    monkeypatch.setenv('MCP_HOST','127.0.0.1')
+    calls=[]
+    monkeypatch.setattr('dot_mcp.vault.main',lambda argv:calls.append(argv) or 0)
+    monkeypatch.setattr(cli,'get_secret',lambda: (_ for _ in ()).throw(AssertionError('vault main owns local unlock/auth provisioning')))
+    result=cli._cmd_start(argparse.Namespace(port=33042,data_dir=str(tmp_path),json=False,vault=True))
+    assert result==0
+    assert calls==[['serve','--data-dir',str(tmp_path.resolve())]]
+    assert __import__('os').environ['MCP_PORT']=='33042'
+
+
+@pytest.mark.parametrize('tty,json_mode',[(False,True),(True,True),(False,False)])
+def test_start_vault_noninteractive_remains_locked(tmp_path,monkeypatch,capsys,tty,json_mode):
+    monkeypatch.setattr('sys.stdin.isatty',lambda:tty)
+    monkeypatch.setattr('dot_mcp.vault.main',lambda *args: (_ for _ in ()).throw(AssertionError('must not unlock')))
+    monkeypatch.setattr(cli,'get_secret',lambda:'fixture-owner-not-output')
+    monkeypatch.setattr(cli,'server_python',lambda:('python',None))
+    monkeypatch.setattr(cli.subprocess,'run',lambda *args,**kwargs:type('Result',(),{'stdout':'mcp-ok'})())
+    monkeypatch.setattr(cli.ui,'plain_flow',lambda *args,**kwargs:orchestrator.FlowResult(True,public_url='https://fixture.test/mcp/',host='fixture.test'))
+    monkeypatch.setattr(cli,'_start_oauth_client',lambda *args:{'client_id':'fixture','client_secret':'fixture-client-not-output'})
+    assert cli._cmd_start(argparse.Namespace(port=33043,data_dir=str(tmp_path),json=json_mode,vault=True))==0
+    output=capsys.readouterr()
+    assert 'Vault remains locked' in output.err
+    assert 'fixture-owner-not-output' not in output.out+output.err
+    assert 'fixture-client-not-output' not in output.out+output.err

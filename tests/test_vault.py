@@ -83,3 +83,37 @@ def test_cli_serve_reuses_owner_credential(tmp_path,monkeypatch):
     assert __import__('os').environ['MCP_PATH_SECRET']=='owner-fixture-secret'
     # Environment mutation is intentionally for launched server. Clean this test.
     monkeypatch.delenv('MCP_PATH_SECRET',raising=False)
+
+
+def test_start_vault_actual_local_unlock_without_child(tmp_path,monkeypatch):
+    import argparse
+    import os
+    from dot_mcp import cli
+    import dot_mcp.vault as module
+    v=LocalVault(tmp_path);v.unlock(PASSPHRASE,create=True);v.close()
+    for key in ('MCP_PORT','MCP_HOST','DOT_MCP_DATA','MCP_PATH_SECRET'):
+        monkeypatch.setenv(key,os.environ.get(key,''))
+    monkeypatch.delenv('MCP_PATH_SECRET',raising=False)
+    monkeypatch.setenv('MCP_PUBLIC_HOST','fixture.tunnl.gg')
+    monkeypatch.setattr('sys.stdin.isatty',lambda:True)
+    prompts=[]
+    def local_prompt(prompt):
+        prompts.append(prompt)
+        return PASSPHRASE
+    monkeypatch.setattr(module.getpass,'getpass',local_prompt)
+    monkeypatch.setattr(cli,'get_secret',lambda:'owner-fixture-only')
+    monkeypatch.setattr(cli.ui,'plain_flow',lambda *a,**kw:pytest.fail('must not detach or tunnel'))
+    monkeypatch.setattr(cli.subprocess,'Popen',lambda *a,**kw:pytest.fail('must not hand off key to child'))
+    def foreground(name,run_name):
+        assert name=='dot_mcp.server' and run_name=='__main__'
+        assert module.ACTIVE_VAULT.names()==[]
+        assert os.environ['DOT_MCP_DATA']==str(tmp_path.resolve())
+        assert os.environ['MCP_PORT']=='33044'
+        assert os.environ['MCP_HOST']=='127.0.0.1'
+        assert os.environ['MCP_PUBLIC_HOST']=='fixture.tunnl.gg'
+        assert os.environ['MCP_PATH_SECRET']=='owner-fixture-only'
+        assert PASSPHRASE not in os.environ.values()
+    monkeypatch.setattr('runpy.run_module',foreground)
+    assert cli._cmd_start(argparse.Namespace(port=33044,data_dir=str(tmp_path),json=False,vault=True))==0
+    assert len(prompts)==1
+    with pytest.raises(VaultError):module.ACTIVE_VAULT.names()

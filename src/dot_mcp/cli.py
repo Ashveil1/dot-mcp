@@ -126,6 +126,17 @@ def cmd_start(args: argparse.Namespace) -> int:
 def _cmd_start(args: argparse.Namespace) -> int:
     port = args.port or DEFAULT_PORT
     data_dir = args.data_dir or DEFAULT_DATA
+    if getattr(args, "vault", False):
+        if args.json or not sys.stdin.isatty():
+            print("Vault remains locked in noninteractive/JSON startup; use a private local terminal to unlock.", file=sys.stderr)
+        else:
+            from dot_mcp.vault import main as vault_main
+            console.print("Starting foreground with a local vault prompt. No tunnel is started; use dots tunnel in another terminal. Ctrl+C stops this server.")
+            os.environ["MCP_PORT"] = str(port)
+            os.environ["MCP_HOST"] = "127.0.0.1"
+            # Public issuer must be configured by the human before boot. The
+            # passphrase stays in this foreground process, never child env/args.
+            return vault_main(["serve", "--data-dir", str(Path(data_dir).resolve())])
     # Owner secret: stable per machine (env wins, else file, else generate+save).
     secret = (os.environ.get("MCP_PATH_SECRET", "").strip() or get_secret())
     py, src_dir = server_python()
@@ -192,15 +203,15 @@ def cmd_doctor(args):
     """Local diagnostics without opening browser, revealing secrets or changing state."""
     import importlib.util
     import importlib.metadata
-    import shutil
     import urllib.request
     py, src = server_python()
     report = {"interpreter": py, "source": src, "packages": {}, "optional": {}}
     for name in ("mcp", "uvicorn", "playwright", "cryptography", "websockets"):
         try: report["packages"][name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError: report["packages"][name] = "not installed"
-    report["optional"]["browser_executable"] = os.environ.get("DOT_MCP_BROWSER_EXECUTABLE") or shutil.which("chromium") or shutil.which("google-chrome") or "Playwright-managed (not verified)"
-    report["vault"] = "locked by default; human vault serve required"
+    from dot_mcp.browser import browser_executable
+    report["optional"]["browser_executable"] = browser_executable() or "Playwright-managed (not verified)"
+    report["vault"] = "locked by default; human start --vault or vault serve required"
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{args.port or DEFAULT_PORT}/health", timeout=3) as r:
             health = json.load(r)
@@ -292,10 +303,11 @@ def main(argv: list[str] | None = None) -> int:
         return vault_main(route[1:])
     ap = argparse.ArgumentParser(prog="dot-mcp", description="dot-mcp personal agent CLI")
     sub = ap.add_subparsers(dest="cmd")
-    p = sub.add_parser("start", help="run MCP server + tunnel (runs in background)")
+    p = sub.add_parser("start", help="run server + tunnel in background; --vault unlocks a foreground server")
     p.add_argument("--port", type=int, default=0, help="override port (default 33041)")
     p.add_argument("--data-dir", default="", help="override data dir (default ~/.dot-mcp)")
     p.add_argument("--json", action="store_true", help="script mode: JSON result, server left running")
+    p.add_argument("--vault", action="store_true", help="human local unlock + foreground server (no automatic tunnel); noninteractive stays locked")
     q = sub.add_parser("status", help="check if the server is running")
     q.add_argument("--port", type=int, default=0, help="override port (default 33041)")
     sub.add_parser("stop", help="stop server + tunnel")
