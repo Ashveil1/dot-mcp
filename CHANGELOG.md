@@ -1,46 +1,24 @@
 # Changelog
 
-## Unreleased
-- Add explicit session opt-in password-free view links, revocation and owner-gated control
-- Refresh responsive live browser UI with clear viewing/control and privacy states
+## 0.2.0
 
-- Open stable-key tunnel first and set server public hostname automatically with one boot
-- Add local Secret Service enable-auto/disable-auto opt-in; no keyring means locked, no plaintext fallback
+### Stable one-command startup and vault convenience
+- Open the stable-key tunnl.gg tunnel first, discover its hostname and boot the server once with the correct MCP_PUBLIC_HOST (no manual export, no restart dance)
+- Add `dots vault enable-auto`/`disable-auto`: one-time local Secret Service opt-in with typed ENABLE confirmation; no keyring means the vault stays locked, no plaintext fallback
+- `start --vault` keeps the human getpass prompt and foreground server, now with its own tunnel and cleanup
 
-- Return clear not_installed browser dependency results; ask before installing, never install silently
-- Check server-interpreter Playwright/websockets and executable availability, with managed Chromium fallback
+### Browser dependency reporting and installed Chrome
+- Prefer installed PATH Chrome/Chromium (explicit DOT_MCP_BROWSER_EXECUTABLE wins), with the same resolver in doctor; dedicated profile and sandbox unchanged
+- browser_open returns a clear `not_installed` result naming missing Playwright/websockets/browser, so the AI asks before installing; nothing is installed silently
 
+### Live view sharing and UI
+- Add per-session opt-in password-free view links (`share_view`, `browser_share_view`) with token rotation on toggle/revocation; control always requires the owner secret plus the control capability
+- Refresh the responsive live page with automatic view join, owner-auth fallback and clear viewing/control/privacy states
 
-### Installed browser and explicit vault startup
-- Prefer installed PATH Chrome/Chromium with explicit executable override and dedicated profile
-- Use the same browser selection in doctor diagnostics
-- Add start --vault for human-only local passphrase unlock and foreground server
-- Keep noninteractive/JSON startup locked; no silent unlock or passphrase child handoff
-- Restore omitted tunnel helper and its mocked regressions from Round11
-
-- Add optional dedicated Chromium profile with nine browser tools and masked PNG work artifacts
-- Add /live watch and human control with separate expiring capabilities plus owner-token authentication on every visit
-- Serialize human takeover against AI changes; revoke live capabilities on close
-- Stream latest-frame CDP JPEGs with actual FPS counters and a lower-rate screenshot fallback
-- Add durable SQLite tasks, checkpoints, command sessions, artifact references and results
-- Add async command start/status/cancel with streamed bounded output and idempotency keys
-- Add bootstrap_context for new-chat continuity and review-before-purge output retention
-- Import legacy task records once with a private backup; preserve original JSON APIs
-- Reconcile interrupted commands after process crashes; never automatically replay commands
-- Add real two-client MCP coding demo and actual owner-crash/reopen tests
-- Canonicalize nonexistent paths before root checks; preserve lock/body failures
-- Serialize guarded writes, edits, and appends; reject missing SHA-guarded files
-- Write JSON state with private permissions and clean atomic temporary files
-- Track Linux child process identity and stop only owned processes; serialize CLI lifecycle
-- Clean failed CLI startup resources and show failure diagnostics
-- Align secret directories and shell scripts with packaged server lifecycle
-- Fix OAuth authorization-code and refresh-token responses crashing during result unpacking
-- Bind token requests to the presented client ID, including HTTP Basic credentials
-- Enforce S256 PKCE on direct consent POSTs and preserve the method in the consent form
-- Reject malformed redirects and loopback lookalikes; support exact IPv6 loopback
-- Consume codes and refresh tokens only after successful request validation
-- Advertise all supported client authentication methods; disable token-response caching
-- Add endpoint-level OAuth regressions and Python/MCP compatibility test CI
+### Fixes
+- Restore the omitted tunnl.gg tunnel helper and its mocked regressions
+- Make the vault ciphertext tamper test deterministic (guaranteed byte flip)
+- Make the JWT signature tamper test deterministic (guaranteed changed first character)
 
 ## 0.1.1
 - README rewritten in English (install + usage, 22 tools, OAuth, security model)

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from pathlib import Path
 import time
@@ -32,7 +33,11 @@ def test_integrity_expiry_concurrent_owner(tmp_path):
     v.last_used=time.monotonic()-901
     with pytest.raises(VaultError):v.names()
     v.unlock(PASSPHRASE);v.close()
-    doc=json.loads(v.path.read_text());doc['ciphertext']='a'+doc['ciphertext'][1:];v.path.write_text(json.dumps(doc))
+    doc=json.loads(v.path.read_text())
+    ciphertext=bytearray(base64.b64decode(doc['ciphertext'],validate=True))
+    ciphertext[0]^=1  # guaranteed changed decoded byte, not a possibly identical base64 character
+    doc['ciphertext']=base64.b64encode(ciphertext).decode()
+    v.path.write_text(json.dumps(doc))
     with pytest.raises(VaultError):v.unlock(PASSPHRASE)
 
 
