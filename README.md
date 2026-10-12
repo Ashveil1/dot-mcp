@@ -51,6 +51,33 @@ untrusted workloads.
 Options: `--port` (default 33041), `--data-dir` (default `~/.dot-mcp`),
 `--json` (script-friendly output).
 
+### Development tunnel (testing only)
+
+`dots start --dev` uses a Cloudflare quick tunnel instead of the default
+stable-key tunnl.gg flow. It needs `cloudflared` on PATH, not OpenSSH. Missing
+`cloudflared` is reported as `not installed: cloudflared`; nothing is installed.
+
+DEV / UNSTABLE: quick-tunnel hostnames change on every restart and have no
+uptime guarantee. Error 1033/outages can occur. Cloudflare quick tunnels do not
+support SSE, so some MCP client/transport combinations can fail even if startup
+initialize passes. Do not use this mode for production connectors.
+
+Host/Origin protection stays enabled. The discovered trycloudflare.com host is
+passed to the server before its single boot, with authenticated public initialize
+verification. A failed check stops the owned server and tunnel. `dots stop`
+stops either provider; `--json` includes mode, provider and unstable fields.
+An explicit empty Cloudflare config prevents reusing a saved named tunnel.
+
+This is a provider switch, NOT a security sandbox: use a separate container/OS
+user with throwaway credentials. Dev mode does not change default data or
+credential paths and can still use an existing local vault opt-in. In an isolated
+sandbox, use separate `DOT_MCP_DATA` and `DOT_MCP_STATE_DIR` paths and a disposable
+HOME; do not mount personal files. Optional browser/vault packages are not needed
+for a basic MCP/OAuth smoke test. `--dev --vault` uses the same dev provider but
+requires the normal local vault unlock.
+
+Cloudflare docs: https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/
+
 ## What it can do (33 tools in this development revision)
 
 - **Shell:** `run_command` (background sessions + timeout) + `read_output`

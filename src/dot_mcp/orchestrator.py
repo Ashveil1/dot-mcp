@@ -139,6 +139,7 @@ class StartCtx:
     py: str
     env: dict
     repo: Path
+    dev: bool = False
 
 
 @dataclass
@@ -257,6 +258,55 @@ def _start_tunnl(repo: Path, port: int, key: Path):
             _kill_proc(proc)
         _kill_tunnel(repo)
         raise
+
+
+_DEV_URL = re.compile(r'https://[a-z0-9-]+\.trycloudflare\.com(?![a-zA-Z0-9.-])')
+
+
+def _start_dev_tunnel(repo: Path, port: int):
+    """Testing only. Use an empty explicit config, never a saved named tunnel."""
+    executable = shutil.which("cloudflared")
+    if not executable:
+        raise RuntimeError("not installed: cloudflared")
+    if not 1 <= int(port) <= 65535:
+        raise ValueError("port must be 1..65535")
+    lifecycle.stop(repo / "logs" / "tunnel.json")
+    directory = repo / "logs"
+    directory.mkdir(parents=True, exist_ok=True)
+    # Private temporary config bypasses ~/.cloudflared/config.yml. Remove it
+    # after discovery or failure; cloudflared loads it before printing the URL.
+    import tempfile
+    fd, config = tempfile.mkstemp(prefix="quick-tunnel-", suffix=".yml", dir=directory)
+    with os.fdopen(fd, "w") as output:
+        output.write("{}\n")
+    log = repo / "tunnel.log"
+    proc = None
+    try:
+        fd = os.open(log, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        os.fchmod(fd, 0o600)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("TUNNEL_")}
+        with os.fdopen(fd, "wb") as output:
+            proc = subprocess.Popen([executable, "tunnel", "--config", config,
+                "--no-autoupdate", "--url", f"http://127.0.0.1:{int(port)}"],
+                env=env, stdout=output, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, start_new_session=True)
+        lifecycle.record(directory / "tunnel.json", proc.pid)
+        end = time.monotonic() + 45
+        while time.monotonic() < end:
+            if proc.poll() is not None:
+                raise RuntimeError("dev tunnel exited; inspect private tunnel.log")
+            match = _DEV_URL.search(log.read_text(errors="replace"))
+            if match:
+                return match.group(0)
+            time.sleep(.2)
+        raise RuntimeError("dev tunnel URL unavailable after 45 seconds; inspect private tunnel.log")
+    except BaseException:
+        if proc is not None:
+            _kill_proc(proc)
+        _kill_tunnel(repo)
+        raise
+    finally:
+        Path(config).unlink(missing_ok=True)
 
 
 def _public_init_ok(mcp_url: str, secret: str, timeout: int = 20, tries: int = 3) -> bool:
@@ -515,8 +565,12 @@ def plain_flow(ctx: StartCtx, state_dir: Path, console, leave_running: bool = Fa
 
 def _plain_flow(ctx: StartCtx, state_dir: Path, console, leave_running: bool = False) -> FlowResult:
     """Discover stable hostname first, then boot once with correct issuer."""
-    console.print("Opening stable tunnel...")
-    url = _start_tunnl(ctx.repo, ctx.port, _ensure_tunnl_key(state_dir))
+    if ctx.dev:
+        console.print("DEV / UNSTABLE: opening Cloudflare quick tunnel (testing only)...")
+        url = _start_dev_tunnel(ctx.repo, ctx.port)
+    else:
+        console.print("Opening stable tunnel...")
+        url = _start_tunnl(ctx.repo, ctx.port, _ensure_tunnl_key(state_dir))
     host = url.split("://", 1)[1]
     env = dict(ctx.env, MCP_PUBLIC_HOST=host)
     ctx.env["MCP_PUBLIC_HOST"] = host
@@ -543,6 +597,9 @@ def json_result(ok: bool, ctx: StartCtx, res: FlowResult, oauth: dict) -> str:
         "issuer": f"https://{res.host}" if ok else "",
         "client_id": oauth.get("client_id", ""),
         "credentials_hidden": True,
+        "mode": "dev" if ctx.dev else "production",
+        "tunnel_provider": "cloudflare-quick" if ctx.dev else "tunnl.gg",
+        "unstable": ctx.dev,
         "port": ctx.port,
         "reason": res.reason,
     }, indent=2)
