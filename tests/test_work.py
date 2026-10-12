@@ -290,7 +290,7 @@ def test_mcp_tool_demo_across_two_client_sessions(tmp_path):
                 async with ClientSession(streams[0], streams[1]) as session:
                     await session.initialize()
                     defs = await session.list_tools()
-                    assert len(defs.tools) == 45
+                    assert len(defs.tools) == 46
                     task = await call(session, "create_work_task", {"title": "Write a greeting script"})
                     command = "printf 'print(\"hello\")\\n' > greeting.py; python3 greeting.py"
                     started = await call(session, "start_command", {"command": command, "task_id": task["id"], "idempotency_key": "mcp-demo"})

@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Add explicit session opt-in password-free view links, revocation and owner-gated control
+- Refresh responsive live browser UI with clear viewing/control and privacy states
+
 - Open stable-key tunnel first and set server public hostname automatically with one boot
 - Add local Secret Service enable-auto/disable-auto opt-in; no keyring means locked, no plaintext fallback
 

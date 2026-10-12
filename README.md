@@ -571,3 +571,23 @@ browser. Installed-but-broken imports, missing system libraries, display or
 sandbox failures are runtime failures, not proof that Chrome is absent. No
 sandbox downgrade or automatic dependency fix is attempted. Vault startup is
 unchanged.
+
+### Password-free live viewing (explicit session opt-in)
+
+`browser_open(..., share_view=true)` or `browser_share_view(enabled=true)`
+enables password-free viewing for that browser session and returns a ready-to-open
+`live_view_url`. Default sessions still require owner authentication for viewing.
+The long random token is in the URL fragment, not server request URLs. `/live`
+alone never exposes video. Tokens expire after one hour and close revokes them;
+view connections last at most 15 minutes before reconnecting.
+
+Anyone with an enabled view link can see **unmasked page video**, including
+private information. Treat the link as a secret. The AI must get your approval
+before enabling or sharing it. `browser_share_view(enabled=false)` rotates the
+view token, disconnects old viewers and restores owner-authenticated viewing.
+Control is separate: a control link plus your owner secret/OAuth token is always
+required. A view token cannot become a control token, even with a password.
+Existing exact-Origin checks, limits and post-vault-fill video blocking remain.
+
+The live page tries tokenized view automatically. Private view/control links
+show an owner-token form. It never stores that owner token.

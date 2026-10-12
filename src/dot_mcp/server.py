@@ -660,9 +660,14 @@ def _browser_call(action, **args):
         raise ToolError(str(exc)) from None
 
 @srv.tool()
-def browser_open(url: str = "https://example.com", headless: bool = True) -> dict:
+def browser_open(url: str = "https://example.com", headless: bool = True, share_view: bool = False) -> dict:
     """Open dedicated profile. If not_installed, ask user before installing missing dependencies. No automatic install. Give live_view_url; control URL only to intended controllers. No secrets in chat."""
-    return _browser_call("open", url=url, headless=headless)
+    return _browser_call("open", url=url, headless=headless, share_view=share_view)
+
+@srv.tool()
+def browser_share_view(enabled: bool = True) -> dict:
+    """Opt in/revoke password-free view for this session. Anyone with the link sees unmasked page video. Get user approval; disabling rotates old view links. Control still requires owner authentication."""
+    return _browser_call("share_view", enabled=enabled)
 
 @srv.tool()
 def browser_navigate(url: str) -> dict:
