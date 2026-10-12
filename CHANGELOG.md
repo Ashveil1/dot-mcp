@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- Report typed, safe tool error causes consistently under MCP 1 and 2 without echoing raw exceptions or argument values
+
 ## 0.2.2
 - Preserve add_update history when set_goal changes or repeats the goal
 - Make file-tool allowed roots, Android /tmp mapping and effective paths explicit; keep root protections

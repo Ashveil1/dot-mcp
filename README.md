@@ -631,3 +631,13 @@ Existing exact-Origin checks, limits and post-vault-fill video blocking remain.
 
 The live page tries tokenized view automatically. Private view/control links
 show an owner-token form. It never stores that owner token.
+
+### Safe tool errors
+
+Tool failures return `isError` with JSON text containing `ok: false` and an
+`error` object: `code`, safe `message`, optional `field`, and optional `allowed`
+values. Codes include `not_found`, `bad_argument`, `invalid_state`,
+`precondition_failed`, `permission_denied`, `resource_limit` and `tool_failed`.
+Validation and anticipated failures behave the same under MCP 1 and 2. Raw
+exception text, argument values, OS paths and browser-page text are not returned.
+Unknown failures give a generic safe cause instead of guessing a diagnosis.

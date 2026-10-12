@@ -185,7 +185,7 @@ def test_edit_serializes_and_checks_unique_match():
     target = srv.HOME / "edit.txt"
     target.write_text("one")
     srv.edit_file(str(target), "one", "two")
-    with pytest.raises(ValueError, match="0x"):
+    with pytest.raises(ValueError, match="match must occur exactly once"):
         srv.edit_file(str(target), "one", "three")
     assert target.read_text() == "two"
 
