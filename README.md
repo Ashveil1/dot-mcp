@@ -492,23 +492,102 @@ logic, but discovery is not a successful launch test. Playwright and WebSocket
 packages are still required. The binary is reused, **not** your main browser
 profile or already-open tabs; dot-mcp retains its own profile and sandbox.
 
-Vault tools are present by default, but encryption requires a human key. No
-silent unlock has been added. After human `vault init` and `vault set`, you can
-use the regular start entry point in a private terminal:
+Vault tools are present by default; encryption still needs an initialized local
+vault. `dots start` now opens the stable-key tunnl.gg tunnel first, discovers its
+hostname, sets `MCP_PUBLIC_HOST` for the server and boots it once. No manually
+exported hostname or second tunnel terminal is required. The dedicated key and
+known-hosts file live in the local state directory. Keep that key to retain the
+provider's stable identity. Tunnel availability and the warning page still
+depend on tunnl.gg; "stable" does not promise uptime.
+
+For a manual local passphrase prompt and foreground lifetime:
 
 ```fish
-set -gx MCP_PUBLIC_HOST your-stable-public-host.tunnl.gg
-.venv/bin/python -m dot_mcp.cli start --vault --port 33041
-# In a second terminal, for the already-running server:
-.venv/bin/python -m dot_mcp.cli tunnel --port 33041
+.venv/bin/python -m dot_mcp.cli start --vault
 ```
 
-`start --vault` prompts locally with getpass and runs the server in the
-foreground, with no automatic tunnel or background child-key handoff. Keep the
-terminal open; Ctrl+C stops the server. The configured public hostname must
-match the tunnel, as before. Noninteractive or `--json` startup never prompts
-or unlocks: it follows normal detached startup with a locked vault and reports
-that choice on stderr. The passphrase is never an argument, chat message or
-environment value. Missing/uninitialized vault is a human setup step, not an
-automatic empty-vault creation. Idle auto-lock, exact origins, privacy mode and
-same-user shell limitations are unchanged.
+This starts its own tunnel. Keep the terminal open; Ctrl+C stops both. In
+noninteractive or JSON mode there is no prompt. A prior keyring opt-in may still
+unlock the detached server. Without opt-in/keyring, the vault remains locked.
+
+### One-time local vault auto-unlock opt-in (Linux Secret Service)
+
+After human `vault init`/`vault set`, install the optional auto-unlock dependency
+only if you choose to use it. On Arch, an unlocked Secret Service provider
+(e.g. the keyring used by your desktop) and its D-Bus session must be available
+in the server environment. No provider or package is installed by this command.
+
+```fish
+.venv/bin/python -m pip install -e '.[vault-auto]'
+.venv/bin/python -m dot_mcp.cli vault enable-auto
+.venv/bin/python -m dot_mcp.cli start
+```
+
+`enable-auto` requires a local terminal, shows a warning, asks you to type
+`ENABLE`, then prompts for the passphrase with getpass. It verifies the existing
+vault and stores the passphrase only in OS Secret Service. A private opt-in
+marker contains no secret. The server retrieves the secret directly on boot,
+never via arguments, environment, chat or a parent-to-child key handoff. There
+is no plaintext or alternate keyring backend fallback. Missing/locked keyring,
+missing opt-in, wrong secret or failed unlock leaves the vault locked. Server
+log reports only locked/unlocked status, not the passphrase.
+
+**Warning:** any same-user process with access to the unlocked OS keyring can
+retrieve this passphrase and unlock the vault. This is convenience on your own
+trusted machine, not a boundary against your shell or other same-user software.
+Idle auto-lock and `vault_lock` still lock; they do not automatically reopen on
+a later tool call. Restarting the server retries auto-unlock.
+
+```fish
+.venv/bin/python -m dot_mcp.cli vault disable-auto
+```
+
+Disabling removes the opt-in first and deletes the keyring entry. If the OS
+keyring is unavailable/locked, the command reports that credential deletion
+failed; unlock it locally and rerun. Auto-unlock remains disabled meanwhile.
+Stop/restart any already-unlocked server to drop its in-memory key. Exact-origin
+fill and post-fill privacy mode are unchanged. `dots tunnel` remains available
+for an already-running server; do not run a second tunnel for `dots start`.
+
+### Missing browser dependencies
+
+`browser_open` checks the running server's Python for Playwright and websockets,
+then selects installed PATH Chrome/Chromium or Playwright-managed Chromium.
+An explicit executable override is checked for an executable file. With neither
+an installed browser nor a managed browser, it reports the browser as missing.
+
+Missing dependencies return a tool result such as:
+
+```json
+{"ok": false, "error": "not_installed", "missing": ["playwright", "websockets"], "message": "not installed: playwright, websockets", "next_action": "Ask the user whether to install or configure the missing dependencies. Do not install without user approval."}
+```
+
+The tool does not run pip, a package manager or a browser installer. The AI must
+ask before installing. These checks are rerun on each new `browser_open` attempt;
+after approved installation, restart the server if its environment changed.
+`dots doctor --json` includes `optional.browser_missing` for packages and an
+explicit/PATH executable; it does not start Playwright to check its managed
+browser. Installed-but-broken imports, missing system libraries, display or
+sandbox failures are runtime failures, not proof that Chrome is absent. No
+sandbox downgrade or automatic dependency fix is attempted. Vault startup is
+unchanged.
+
+### Password-free live viewing (explicit session opt-in)
+
+`browser_open(..., share_view=true)` or `browser_share_view(enabled=true)`
+enables password-free viewing for that browser session and returns a ready-to-open
+`live_view_url`. Default sessions still require owner authentication for viewing.
+The long random token is in the URL fragment, not server request URLs. `/live`
+alone never exposes video. Tokens expire after one hour and close revokes them;
+view connections last at most 15 minutes before reconnecting.
+
+Anyone with an enabled view link can see **unmasked page video**, including
+private information. Treat the link as a secret. The AI must get your approval
+before enabling or sharing it. `browser_share_view(enabled=false)` rotates the
+view token, disconnects old viewers and restores owner-authenticated viewing.
+Control is separate: a control link plus your owner secret/OAuth token is always
+required. A view token cannot become a control token, even with a password.
+Existing exact-Origin checks, limits and post-vault-fill video blocking remain.
+
+The live page tries tokenized view automatically. Private view/control links
+show an owner-token form. It never stores that owner token.

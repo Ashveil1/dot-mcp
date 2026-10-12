@@ -143,7 +143,7 @@ ACTIVE_VAULT = None
 def main(argv=None):
     import argparse
     ap=argparse.ArgumentParser(prog='dot-mcp vault')
-    ap.add_argument('action',choices=['init','set','list','delete','serve'])
+    ap.add_argument('action',choices=['init','set','list','delete','serve','enable-auto','disable-auto'])
     ap.add_argument('--data-dir',default=os.environ.get('DOT_MCP_DATA',str(Path.home()/'.dot-mcp')))
     ap.add_argument('--name',default='')
     ap.add_argument('--origin',default='')
@@ -153,6 +153,20 @@ def main(argv=None):
     v=LocalVault(args.data_dir)
     try:
         if not __import__("sys").stdin.isatty(): raise VaultError("vault requires a private interactive terminal")
+        if args.action in ('enable-auto', 'disable-auto'):
+            from dot_mcp import vault_auto
+            if args.action == 'disable-auto':
+                vault_auto.disable(args.data_dir)
+                print('Auto-unlock disabled and stored keyring credential removed. Stop/restart any running unlocked server.')
+                return 0
+            print(vault_auto.WARNING)
+            if input('Type ENABLE to opt in: ').strip() != 'ENABLE':
+                raise VaultError('opt-in cancelled')
+            password = getpass.getpass('Vault passphrase (not echoed): ')
+            try: vault_auto.enable(args.data_dir, password)
+            finally: password = None
+            print('Auto-unlock enabled for this vault on future server starts.')
+            return 0
         password=getpass.getpass('Vault passphrase (not echoed): ')
         if args.action=='init' and password!=getpass.getpass('Repeat passphrase: '):raise VaultError('passphrases differ')
         v.unlock(password,create=args.action=='init');password=None
@@ -181,8 +195,11 @@ def main(argv=None):
             runpy.run_module('dot_mcp.server',run_name='__main__')
         else:print('Vault initialized.')
         return 0
-    except (VaultError,KeyboardInterrupt):
-        print('Vault operation failed or cancelled; no secret values were printed.',file=__import__('sys').stderr)
+    except (VaultError,KeyboardInterrupt) as exc:
+        if args.action == 'disable-auto' and isinstance(exc, VaultError):
+            print(str(exc), file=__import__('sys').stderr)
+        else:
+            print('Vault operation failed or cancelled; no secret values were printed.',file=__import__('sys').stderr)
         return 1
     finally:v.close()
 

@@ -8,6 +8,7 @@ import asyncio
 import base64
 import concurrent.futures
 import json
+import importlib.util
 import os
 from pathlib import Path
 import secrets
@@ -32,6 +33,25 @@ def browser_executable():
         if found:
             return found
     return None
+
+def browser_dependencies():
+    """Read-only checks in the server interpreter; no installers or subprocesses."""
+    missing = []
+    for package in ("playwright", "websockets"):
+        if importlib.util.find_spec(package) is None:
+            missing.append(package)
+    executable = browser_executable()
+    if executable and not (Path(executable).is_file() and os.access(executable, os.X_OK)):
+        missing.append("configured Chrome/Chromium executable")
+    return {"missing": missing, "executable": executable}
+
+
+def not_installed(missing):
+    """An actionable tool result, not permission to install anything."""
+    return {"ok": False, "error": "not_installed", "missing": missing,
+            "message": "not installed: " + ", ".join(missing),
+            "next_action": "Ask the user whether to install or configure the missing dependencies. Do not install without user approval."}
+
 
 class BrowserError(ValueError):
     pass
@@ -61,6 +81,7 @@ class LocalBrowser:
         self.fallback = None
         self.stream_mode = "cdp"
         self.sensitive = False
+        self.share_view = False
         self.stream_quality = max(30, min(85, int(os.environ.get("DOT_MCP_STREAM_QUALITY", "55"))))
         self.stream_width = max(640, min(1280, int(os.environ.get("DOT_MCP_STREAM_WIDTH", "960"))))
 
@@ -75,7 +96,7 @@ class LocalBrowser:
         if self.operation_lock is None:
             self.operation_lock = asyncio.Lock()
         async with self.operation_lock:
-            if self.controller is not None and action not in ("close", "screenshot", "snapshot", "links"):
+            if self.controller is not None and action not in ("close", "screenshot", "snapshot", "links", "share_view"):
                 raise BrowserError("human control active; wait for the person to release control")
             result = await getattr(self, "_" + action)(**args)
             if self.sensitive and action != "close":
@@ -108,28 +129,38 @@ class LocalBrowser:
                 "live_control_url": self.base_url + "/live#token=" + self.tokens["control"],
                 "expires_at": self.expires, "target_fps": 60, "stream_mode": self.stream_mode, "stream_quality": self.stream_quality, "stream_width": self.stream_width,
                 "captured_fps": round(self.frames / max(0.001, time.monotonic() - self.started), 2),
-                "note": "Give the view URL for watching; control URL grants full browser control. Treat links as secrets. Every visit also requires an owner token entered on /live. Never share the owner secret just to invite viewers. 60 fps is a target, not a guarantee."}
+                "password_free_view": self.share_view,
+                "note": "If password-free view is enabled, anyone with the view link can see unmasked page video until revoked. Give the view URL for watching; control URL grants full browser control. Treat links as secrets. Control always requires an owner token. View requires it unless password-free viewing was explicitly enabled. Never share the owner secret just to invite viewers. 60 fps is a target, not a guarantee."}
 
-    async def _open(self, url="https://example.com", headless=True):
+    async def _open(self, url="https://example.com", headless=True, share_view=False):
         self._url(url)
         if self.context:
             raise BrowserError("browser already open; navigate or close it first")
+        dependencies = browser_dependencies()
+        if dependencies["missing"]:
+            return not_installed(dependencies["missing"])
         try:
             from playwright.async_api import async_playwright
         except ImportError:
-            raise BrowserError("install optional browser extra and Chromium: pip install 'dot-mcp[browser]'; python -m playwright install chromium") from None
+            raise BrowserError("playwright is installed but cannot import; check the server's Python environment. No installation attempted.") from None
         for p in (self.profile, self.shots):
             p.mkdir(parents=True, exist_ok=True)
             p.chmod(0o700)
-        self.playwright = await async_playwright().start()
         try:
+            self.playwright = await async_playwright().start()
+            executable = dependencies["executable"]
+            if executable is None:
+                managed = Path(self.playwright.chromium.executable_path)
+                if not managed.is_file() or not os.access(managed, os.X_OK):
+                    await self._close()
+                    return not_installed(["Chrome/Chromium (PATH or Playwright-managed)"])
             # Chromium's Unix socket path is limited; a deeply nested TMPDIR can
             # abort launch. Prefer a short private system-temp directory.
             temp_root = "/tmp" if os.path.isdir("/tmp") and os.access("/tmp", os.W_OK) else None
             self.browser_tmp = tempfile.TemporaryDirectory(prefix="dmcb-", dir=temp_root)
             browser_env = dict(os.environ, TMPDIR=self.browser_tmp.name)
             self.context = await self.playwright.chromium.launch_persistent_context(
-                str(self.profile), env=browser_env, headless=headless, executable_path=browser_executable(),
+                str(self.profile), env=browser_env, headless=headless, executable_path=executable,
                 chromium_sandbox=True, accept_downloads=False, viewport={"width": 1280, "height": 720},
                 service_workers="block")
             self.context.set_default_timeout(10000)
@@ -146,6 +177,7 @@ class LocalBrowser:
                 if page != self.page:
                     await page.close()
             self.context.on("page", popup)
+            self.share_view = bool(share_view)
             self.tokens = {"view": secrets.token_urlsafe(32), "control": secrets.token_urlsafe(32)}
             self.expires = time.time() + 3600
             self.started = time.monotonic()
@@ -306,6 +338,13 @@ class LocalBrowser:
             value = None
         return {"filled": True, "name": name, "key": key, "privacy_mode": True}
 
+    async def _share_view(self, enabled=True):
+        self._ready()
+        self.share_view = bool(enabled)
+        # Rotate view token: old watchers disconnect, even when disabling sharing.
+        self.tokens["view"] = secrets.token_urlsafe(32)
+        return {"ok": True, **await self._links()}
+
     def authorize(self, token):
         if not self.context or time.time() >= self.expires: return None
         for role, expected in self.tokens.items():
@@ -378,6 +417,7 @@ class LocalBrowser:
 
     async def _close(self):
         self.tokens = {}
+        self.share_view = False
         self.expires = 0
         self.controller = None
         for q in self.clients.values():

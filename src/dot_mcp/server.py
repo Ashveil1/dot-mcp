@@ -660,9 +660,14 @@ def _browser_call(action, **args):
         raise ToolError(str(exc)) from None
 
 @srv.tool()
-def browser_open(url: str = "https://example.com", headless: bool = True) -> dict:
-    """Open the dedicated local profile. Give people live_view_url; only intended controllers get live_control_url. No secrets in chat."""
-    return _browser_call("open", url=url, headless=headless)
+def browser_open(url: str = "https://example.com", headless: bool = True, share_view: bool = False) -> dict:
+    """Open dedicated profile. If not_installed, ask user before installing missing dependencies. No automatic install. Give live_view_url; control URL only to intended controllers. No secrets in chat."""
+    return _browser_call("open", url=url, headless=headless, share_view=share_view)
+
+@srv.tool()
+def browser_share_view(enabled: bool = True) -> dict:
+    """Opt in/revoke password-free view for this session. Anyone with the link sees unmasked page video. Get user approval; disabling rotates old view links. Control still requires owner authentication."""
+    return _browser_call("share_view", enabled=enabled)
 
 @srv.tool()
 def browser_navigate(url: str) -> dict:
@@ -1280,6 +1285,12 @@ if __name__ == "__main__":
     OAuthBearer.__name__ = "OAuthBearer"
     app.add_middleware(OAuthBearer)
     import uvicorn
+    # One attempt per boot, never on tool access (vault_lock/idle lock stay locked).
+    from dot_mcp.vault import ACTIVE_VAULT
+    if ACTIVE_VAULT is None:
+        from dot_mcp.vault_auto import unlock as auto_unlock
+        _VAULT = auto_unlock(DATA_DIR)
+    print("Vault: " + ("unlocked (human prompt)" if ACTIVE_VAULT is not None else "unlocked by local keyring opt-in" if _VAULT is not None else "locked"))
     _work_store()  # recover persistent command states before accepting requests
     sched_ensure()
     _oauth_static_client()  # ensure manual-connector credentials exist
@@ -1288,4 +1299,7 @@ if __name__ == "__main__":
     logging.getLogger("uvicorn").setLevel(logging.ERROR)
     logging.getLogger("uvicorn.error").setLevel(logging.ERROR)
     logging.getLogger("uvicorn.access").setLevel(logging.ERROR)
-    uvicorn.run(app, host=HOST, port=PORT, access_log=False, log_level="error")
+    try:
+        uvicorn.run(app, host=HOST, port=PORT, access_log=False, log_level="error")
+    finally:
+        if _VAULT is not None: _VAULT.close()

@@ -96,6 +96,10 @@ def test_start_vault_actual_local_unlock_without_child(tmp_path,monkeypatch):
     monkeypatch.delenv('MCP_PATH_SECRET',raising=False)
     monkeypatch.setenv('MCP_PUBLIC_HOST','fixture.tunnl.gg')
     monkeypatch.setattr('sys.stdin.isatty',lambda:True)
+    monkeypatch.setattr(cli.ui,'_ensure_tunnl_key',lambda *a:tmp_path/'key')
+    monkeypatch.setattr(cli.ui,'_start_tunnl',lambda *a:'https://fixture.tunnl.gg')
+    monkeypatch.setattr(cli.ui,'_kill_tunnel',lambda *a:None)
+    monkeypatch.setenv('MCP_PUBLIC_HOST','fixture.tunnl.gg')
     prompts=[]
     def local_prompt(prompt):
         prompts.append(prompt)

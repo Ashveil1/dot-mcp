@@ -1,6 +1,15 @@
 # Changelog
 
 ## Unreleased
+- Add explicit session opt-in password-free view links, revocation and owner-gated control
+- Refresh responsive live browser UI with clear viewing/control and privacy states
+
+- Open stable-key tunnel first and set server public hostname automatically with one boot
+- Add local Secret Service enable-auto/disable-auto opt-in; no keyring means locked, no plaintext fallback
+
+- Return clear not_installed browser dependency results; ask before installing, never install silently
+- Check server-interpreter Playwright/websockets and executable availability, with managed Chromium fallback
+
 
 ### Installed browser and explicit vault startup
 - Prefer installed PATH Chrome/Chromium with explicit executable override and dedicated profile

@@ -176,3 +176,47 @@ def test_installed_executable_selection(monkeypatch):
     monkeypatch.delenv('DOT_MCP_BROWSER_EXECUTABLE')
     monkeypatch.setattr('dot_mcp.browser.shutil.which',lambda name:None)
     assert browser_executable() is None
+
+
+def test_password_free_view_opt_in_control_still_requires_owner(browser,local_page):
+    from starlette.websockets import WebSocketDisconnect
+    browser.call('open',url=local_page)
+    old=browser.tokens['view']
+    sharing=browser.call('share_view',enabled=True)
+    assert sharing['password_free_view']
+    assert browser.authorize(old) is None
+    app=Starlette(routes=routes(lambda create=False:browser,lambda:'http://testserver',lambda token:token=='fixture-owner'))
+    with TestClient(app) as client:
+        with client.websocket_connect('/live/ws',headers={'origin':'http://testserver'}) as view:
+            view.send_json({'token':browser.tokens['view']})
+            assert receive_type(view,'ready')['role']=='view'
+            view.send_json({'action':'claim'})
+            assert 'cannot control' in receive_type(view,'error')['message']
+            view.send_json({'action':'text','text':'not allowed'})
+            assert 'cannot control' in receive_type(view,'error')['message']
+        for credential in ('','wrong'):
+            with pytest.raises(WebSocketDisconnect):
+                with client.websocket_connect('/live/ws',headers={'origin':'http://testserver'}) as control:
+                    control.send_json({'token':browser.tokens['control'],'credential':credential});control.receive_json()
+        with client.websocket_connect('/live/ws',headers={'origin':'http://testserver'}) as control:
+            control.send_json({'token':browser.tokens['control'],'credential':'fixture-owner'})
+            assert receive_type(control,'ready')['role']=='control'
+        old=browser.tokens['view']
+        browser.call('share_view',enabled=False)
+        assert browser.authorize(old) is None
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect('/live/ws',headers={'origin':'http://testserver'}) as denied:
+                denied.send_json({'token':browser.tokens['view']});denied.receive_json()
+
+
+def test_revoke_disconnects_connected_password_free_view(browser,local_page):
+    from starlette.websockets import WebSocketDisconnect
+    browser.call('open',url=local_page,share_view=True)
+    app=Starlette(routes=routes(lambda create=False:browser,lambda:'http://testserver',lambda token:token=='fixture-owner'))
+    with TestClient(app) as client:
+        with client.websocket_connect('/live/ws',headers={'origin':'http://testserver'}) as view:
+            view.send_json({'token':browser.tokens['view']});receive_type(view,'ready')
+            browser.call('share_view',enabled=False)
+            view.send_json({'action':'frame_ack','sequence':0})
+            with pytest.raises(WebSocketDisconnect):
+                for _ in range(50):view.receive_json()
