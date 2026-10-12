@@ -135,7 +135,7 @@ def test_jwt_roundtrip_and_tamper():
     tok = srv._jwt_issue(st["as_secret"], "c-1", "dots:full", ttl=60)
     assert srv._jwt_verify(tok) is not None
     h, p, s = tok.split(".")
-    bad = h + "." + p + "." + ("A" if s[-1] != "A" else "B") + s[1:]
+    bad = h + "." + p + "." + ("A" if s[0] != "A" else "B") + s[1:]  # guaranteed changed signature char
     assert srv._jwt_verify(bad) is None
     assert srv._jwt_verify("not.a.jwt") is None
 
