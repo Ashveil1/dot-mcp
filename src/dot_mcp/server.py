@@ -940,9 +940,9 @@ async def _oauth_authorize_req(req):
         scope = q.get("scope", OAUTH_SCOPE)
         hidden = "".join(f'<input type="hidden" name="{k}" value="{_html.escape(q.get(k, ""))}">'
             for k in ("client_id", "redirect_uri", "code_challenge", "code_challenge_method", "scope", "state", "resource"))
-        from dot_mcp.web_ui import authorize, HEADERS
+        from dot_mcp.web_ui import authorize, consent_headers
         page = authorize(str(cl.get("name") or q.get("client_id", "")), str(scope), hidden)
-        return HTMLResponse(page, headers=HEADERS)
+        return HTMLResponse(page, headers=consent_headers(ruri))
     form = await req.form()
     g = lambda k: str(form.get(k, ""))
     origin = req.headers.get("origin", "") or req.headers.get("referer", "")

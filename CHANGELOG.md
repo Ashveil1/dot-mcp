@@ -83,3 +83,8 @@
 ### Production vault leak checks
 - Exercise unlocked vault through real MCP transport; assert no dummy secret in outputs/server/audit logs
 - Fix Chromium Unix socket path overflow with a short private browser temp directory, cleaned on close
+
+### OAuth browser redirect correction
+- Permit only the validated callback HTTPS origin in consent form-action CSP
+- Fix Chromium blocking an otherwise successful OAuth POST redirect
+- Add actual Chromium form-submit/callback regression; retain owner, redirect and PKCE checks

@@ -39,3 +39,13 @@ def test_doctor_json_no_credentials(monkeypatch,capsys):
     report=json.loads(out)
     assert not report['running']['ok']
     assert 'mcp' in report['packages']
+
+
+def test_consent_csp_allows_only_validated_callback_origin():
+    from dot_mcp.web_ui import consent_headers
+    import pytest
+    policy=consent_headers('https://chatgpt.com/connector/oauth/fixture')['Content-Security-Policy']
+    assert "form-action 'self' https://chatgpt.com;" in policy
+    assert '*' not in policy
+    for target in ('http://evil.test/cb','https://user:pass@evil.test/cb','javascript:alert(1)'):
+        with pytest.raises(ValueError):consent_headers(target)

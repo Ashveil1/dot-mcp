@@ -357,3 +357,9 @@ system `/tmp` is writable, even if your configured app TMPDIR is deeply nested.
 It is cleaned on browser close. Browser profile and screenshots still live in
 the dedicated data directory. This prevents Linux Unix-socket path overflow;
 it does not weaken the Chromium sandbox.
+
+The OAuth consent CSP permits the validated callback HTTPS origin as well as
+`self` for form submission. Chromium applies `form-action` to the redirect
+following a POST; restricting it to `self` alone blocked successful OAuth
+callbacks. This allowance is generated from the already-validated redirect,
+not a wildcard, and does not replace owner-secret/redirect/PKCE verification.

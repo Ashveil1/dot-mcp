@@ -8,3 +8,22 @@ HEADERS = {'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Frame-O
 
 def authorize(client,scope,hidden):
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize dot-mcp</title><style>{STYLE}</style></head><body><main><article><div class="brand">DOT-MCP / CONNECT</div><h1>Connect your assistant</h1><p>Approve this connection only if you started it in your assistant's settings.</p><dl class="facts"><dt>Client</dt><dd>{html.escape(client)}</dd><dt>Requested access</dt><dd><code>{html.escape(scope)}</code></dd></dl><p class="warning">This grants owner access to local tools, including shell commands and files. Only connect assistants you trust.</p><form method="post">{hidden}<label for="owner_secret">Owner secret</label><input id="owner_secret" type="password" name="owner_secret" autocomplete="off" required autofocus spellcheck="false" placeholder="Enter directly, never in chat"><button type="submit">Approve connection</button></form><p class="small">Your secret stays out of the redirect URL. To cancel, close this tab without approving.</p></article></main></body></html>'''
+
+
+def consent_headers(redirect_uri):
+    """Chromium applies form-action to the redirect after a form POST.
+
+    Caller must already validate the registered OAuth redirect. Restrict this
+    allowance to its HTTPS origin; never allow arbitrary external forms.
+    """
+    from urllib.parse import urlsplit
+    p = urlsplit(redirect_uri)
+    if p.scheme != 'https' or not p.hostname or p.username is not None or p.password is not None:
+        raise ValueError('invalid consent redirect')
+    host = p.hostname.encode('idna').decode('ascii')
+    host = '[' + host + ']' if ':' in host else host
+    port = p.port
+    target = 'https://' + host + (':' + str(port) if port and port != 443 else '')
+    headers = dict(HEADERS)
+    headers['Content-Security-Policy'] = headers['Content-Security-Policy'].replace("form-action 'self'", "form-action 'self' " + target)
+    return headers
