@@ -164,3 +164,15 @@ def test_live_proxy_warning_cookie_never_bypasses_auth(browser,local_page):
             assert receive_type(ws,'ready')['role']=='view'
         with pytest.raises(WebSocketDisconnect):
             with client.websocket_connect('/live/ws',headers=dict(headers,origin='https://evil.test')):pass
+
+
+def test_installed_executable_selection(monkeypatch):
+    from dot_mcp.browser import browser_executable
+    monkeypatch.delenv('DOT_MCP_BROWSER_EXECUTABLE',raising=False)
+    monkeypatch.setattr('dot_mcp.browser.shutil.which',lambda name:'/home/fixture/.local/bin/google-chrome' if name=='google-chrome' else None)
+    assert browser_executable()=='/home/fixture/.local/bin/google-chrome'
+    monkeypatch.setenv('DOT_MCP_BROWSER_EXECUTABLE','/explicit/chromium')
+    assert browser_executable()=='/explicit/chromium'
+    monkeypatch.delenv('DOT_MCP_BROWSER_EXECUTABLE')
+    monkeypatch.setattr('dot_mcp.browser.shutil.which',lambda name:None)
+    assert browser_executable() is None

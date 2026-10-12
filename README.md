@@ -479,3 +479,36 @@ endpoints. In testing, Cloudflare Quick Tunnel intermittently returned Error
 change. Health working for a few minutes did not guarantee the next tool call.
 Official Quick Tunnel docs promise no uptime SLA and note SSE limitations:
 https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/ .
+
+### Installed Chrome and convenient local vault startup
+
+`browser_open` now selects your installed Chrome/Chromium from PATH when
+`DOT_MCP_BROWSER_EXECUTABLE` is unset, in order: google-chrome,
+google-chrome-stable, chromium, chromium-browser. This includes an executable in
+`~/.local/bin` if that directory is on PATH. An explicit
+`DOT_MCP_BROWSER_EXECUTABLE` still wins. If no installed binary is found,
+Playwright uses its managed Chromium. `dots doctor` reports the same selection
+logic, but discovery is not a successful launch test. Playwright and WebSocket
+packages are still required. The binary is reused, **not** your main browser
+profile or already-open tabs; dot-mcp retains its own profile and sandbox.
+
+Vault tools are present by default, but encryption requires a human key. No
+silent unlock has been added. After human `vault init` and `vault set`, you can
+use the regular start entry point in a private terminal:
+
+```fish
+set -gx MCP_PUBLIC_HOST your-stable-public-host.tunnl.gg
+.venv/bin/python -m dot_mcp.cli start --vault --port 33041
+# In a second terminal, for the already-running server:
+.venv/bin/python -m dot_mcp.cli tunnel --port 33041
+```
+
+`start --vault` prompts locally with getpass and runs the server in the
+foreground, with no automatic tunnel or background child-key handoff. Keep the
+terminal open; Ctrl+C stops the server. The configured public hostname must
+match the tunnel, as before. Noninteractive or `--json` startup never prompts
+or unlocks: it follows normal detached startup with a locked vault and reports
+that choice on stderr. The passphrase is never an argument, chat message or
+environment value. Missing/uninitialized vault is a human setup step, not an
+automatic empty-vault creation. Idle auto-lock, exact origins, privacy mode and
+same-user shell limitations are unchanged.

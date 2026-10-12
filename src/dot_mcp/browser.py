@@ -11,11 +11,27 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import threading
 import tempfile
 import time
 import uuid
 from urllib.parse import urlsplit, urljoin
+
+def browser_executable():
+    """Explicit configured executable wins; otherwise prefer installed Chromium.
+
+    Only binary discovery: never attach to a user's existing profile/session.
+    None asks Playwright to use its own managed Chromium installation.
+    """
+    explicit = os.environ.get("DOT_MCP_BROWSER_EXECUTABLE")
+    if explicit:
+        return explicit
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
 
 class BrowserError(ValueError):
     pass
@@ -113,7 +129,7 @@ class LocalBrowser:
             self.browser_tmp = tempfile.TemporaryDirectory(prefix="dmcb-", dir=temp_root)
             browser_env = dict(os.environ, TMPDIR=self.browser_tmp.name)
             self.context = await self.playwright.chromium.launch_persistent_context(
-                str(self.profile), env=browser_env, headless=headless, executable_path=os.environ.get("DOT_MCP_BROWSER_EXECUTABLE") or None,
+                str(self.profile), env=browser_env, headless=headless, executable_path=browser_executable(),
                 chromium_sandbox=True, accept_downloads=False, viewport={"width": 1280, "height": 720},
                 service_workers="block")
             self.context.set_default_timeout(10000)

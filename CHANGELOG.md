@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased
+
+### Installed browser and explicit vault startup
+- Prefer installed PATH Chrome/Chromium with explicit executable override and dedicated profile
+- Use the same browser selection in doctor diagnostics
+- Add start --vault for human-only local passphrase unlock and foreground server
+- Keep noninteractive/JSON startup locked; no silent unlock or passphrase child handoff
+- Restore omitted tunnel helper and its mocked regressions from Round11
+
 - Add optional dedicated Chromium profile with nine browser tools and masked PNG work artifacts
 - Add /live watch and human control with separate expiring capabilities plus owner-token authentication on every visit
 - Serialize human takeover against AI changes; revoke live capabilities on close
