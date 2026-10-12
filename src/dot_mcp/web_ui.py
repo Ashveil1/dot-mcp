@@ -25,5 +25,9 @@ def consent_headers(redirect_uri):
     port = p.port
     target = 'https://' + host + (':' + str(port) if port and port != 443 else '')
     headers = dict(HEADERS)
+    # no-referrer serializes Origin as "null" on browser form POSTs, which
+    # the consent origin gate correctly rejects. Preserve same-origin Origin
+    # without sending the authorization URL as a cross-origin Referer.
+    headers['Referrer-Policy'] = 'same-origin'
     headers['Content-Security-Policy'] = headers['Content-Security-Policy'].replace("form-action 'self'", "form-action 'self' " + target)
     return headers

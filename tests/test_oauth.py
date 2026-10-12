@@ -213,6 +213,7 @@ def test_proxy_headers_cannot_change_issuer_or_origin(oauth,monkeypatch):
     headers={'Host':'localhost:33041','X-Forwarded-Host':'evil.test','X-Forwarded-Proto':'http','Origin':'https://fixture-abcd.tunnl.gg'}
     consent=oauth.get('/authorize',params={k:v for k,v in fields.items() if k!='owner_secret'},headers=headers)
     assert consent.status_code==200
+    assert consent.headers['referrer-policy']=='same-origin'
     assert "form-action 'self' https://chatgpt.com" in consent.headers['content-security-policy']
     # Provider warning cookie is transport data, never an owner-auth bypass.
     approved=oauth.post('/authorize',data=fields,headers=dict(headers,Cookie='tunnl-warning=accepted'))
@@ -223,3 +224,17 @@ def test_proxy_headers_cannot_change_issuer_or_origin(oauth,monkeypatch):
         assert denied.status_code==403
     denied=oauth.post('/authorize',data=dict(fields,owner_secret='wrong'),headers=headers)
     assert denied.status_code==403
+
+
+def test_consent_default_https_port_is_same_origin(oauth, monkeypatch):
+    monkeypatch.setattr(srv, "_issuer", lambda: "https://fixture.tunnl.gg")
+    cid = register(oauth)
+    verifier = "v" * 43
+    fields = {"client_id": cid, "redirect_uri": "https://client.test/cb",
+              "code_challenge": srv._b64u(hashlib.sha256(verifier.encode()).digest()),
+              "code_challenge_method": "S256", "owner_secret": srv.SECRET,
+              "scope": srv.OAUTH_SCOPE, "resource": "https://fixture.tunnl.gg/mcp"}
+    approved = oauth.post("/authorize", data=fields, headers={"Origin": "https://fixture.tunnl.gg:443"})
+    assert approved.status_code == 302
+    denied = oauth.post("/authorize", data=fields, headers={"Origin": "null"})
+    assert denied.status_code == 403 and denied.json() == {"error": "invalid_request"}

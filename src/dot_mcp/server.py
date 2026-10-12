@@ -1194,36 +1194,17 @@ if __name__ == "__main__":
         except Exception as e:
             tools = [f"<list failed: {e}>"]
         print(json.dumps(tools, indent=2)); raise SystemExit(0)
+    from dot_mcp.transport_security import transport_security
+    ts = transport_security(os.environ.get("MCP_PUBLIC_HOST", ""))
     if _V2:
-        # DNS rebinding protection: loopback + optional public tunnel host(s)
-        ts_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
-        ts_origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
-        for h in [x.strip() for x in os.environ.get("MCP_PUBLIC_HOST", "").split(",") if x.strip()]:
-            h = h.split("://")[-1].split("/")[0]
-            ts_hosts.append(h); ts_origins.append(f"https://{h}")
-        try:
-            from mcp.server.transport_security import TransportSecuritySettings
-            ts = TransportSecuritySettings(enable_dns_rebinding_protection=True,
-                allowed_hosts=ts_hosts, allowed_origins=ts_origins)
-        except Exception:
-            ts = None
         app = srv.streamable_http_app(streamable_http_path=MCP_PATH, stateless_http=True,
-            **({"transport_security": ts} if ts else {}))
+                                      transport_security=ts)
     else:
         # FastMCP v1 defaults to /mcp (without slash) and stateful sessions.
         # Match the advertised endpoint and detached CLI health checks.
         srv.settings.streamable_http_path = MCP_PATH
         srv.settings.stateless_http = True
-        from mcp.server.transport_security import TransportSecuritySettings
-        hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
-        origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
-        for host in os.environ.get("MCP_PUBLIC_HOST", "").split(","):
-            host = host.strip().split("://")[-1].split("/")[0]
-            if host:
-                hosts.append(host)
-                origins.append("https://" + host)
-        srv.settings.transport_security = TransportSecuritySettings(
-            enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=origins)
+        srv.settings.transport_security = ts
         app = srv.streamable_http_app()
     from starlette.responses import JSONResponse
     from starlette.routing import Route
