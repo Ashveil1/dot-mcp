@@ -176,14 +176,75 @@ def _cmd_start(args: argparse.Namespace) -> int:
     oauth = _start_oauth_client(data_dir)
     t = Table("", "", box=box.SIMPLE, show_header=False)
     t.add_row("Public URL", public_mcp)
-    t.add_row("Owner secret", secret)
+    t.add_row("Browser + vault", "optional installs; vault locked by default")
+    t.add_row("Owner secret", "hidden (use dots credentials --show locally)")
     t.add_row("OAuth Client ID", oauth.get("client_id", "—"))
-    t.add_row("OAuth Client secret", oauth.get("client_secret", "—"))
+    t.add_row("OAuth Client secret", "hidden")
     console.print(t)
     console.print(Panel(
         f"[bold green]Running.[/] Paste the public URL into your connector (auth = OAuth).",
         title="ready", border_style=OK))
     console.print("[dim]Server running in the background — dots status / dots stop[/]\n")
+    return 0
+
+
+def cmd_doctor(args):
+    """Local diagnostics without opening browser, revealing secrets or changing state."""
+    import importlib.util
+    import importlib.metadata
+    import shutil
+    import urllib.request
+    py, src = server_python()
+    report = {"interpreter": py, "source": src, "packages": {}, "optional": {}}
+    for name in ("mcp", "uvicorn", "playwright", "cryptography", "websockets"):
+        try: report["packages"][name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError: report["packages"][name] = "not installed"
+    report["optional"]["browser_executable"] = os.environ.get("DOT_MCP_BROWSER_EXECUTABLE") or shutil.which("chromium") or shutil.which("google-chrome") or "Playwright-managed (not verified)"
+    report["vault"] = "locked by default; human vault serve required"
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{args.port or DEFAULT_PORT}/health", timeout=3) as r:
+            health = json.load(r)
+        report["running"] = {"ok": health.get("ok"), "tools": health.get("tools")}
+    except Exception:
+        report["running"] = {"ok": False, "tools": None}
+    # Report current interpreter packages, never claim it proves a different
+    # server interpreter has the same packages.
+    report["package_interpreter"] = sys.executable
+    if args.json: print(json.dumps(report, indent=2))
+    elif HAS_RICH:
+        table = Table("Check", "Result", box=box.SIMPLE)
+        table.add_row("Selected server Python", py)
+        table.add_row("Current diagnostic Python", sys.executable)
+        table.add_row("Source", src or "installed package")
+        for name, value in report["packages"].items(): table.add_row(name, value)
+        table.add_row("Browser executable", str(report["optional"]["browser_executable"]))
+        table.add_row("Running tool count", str(report["running"]["tools"] or "server unavailable"))
+        table.add_row("Vault", report["vault"])
+        console.print(Panel(table, title="dot-mcp doctor", border_style=ACCENT))
+        console.print("If ChatGPT sees old tools: restart the patched server, verify live tool count, refresh the connector. Never substitute separate-process browser scripts for server browser_* tools.")
+    else: print(json.dumps(report, indent=2))
+    return 0
+
+
+def cmd_credentials(args):
+    data = args.data_dir or DEFAULT_DATA
+    oauth = _start_oauth_client(data)
+    if not args.show:
+        console.print("Credentials are hidden by default.")
+        console.print(f"Owner credential file: {SECRET_FILE}")
+        console.print(f"OAuth credential file: {Path(data) / 'oauth.json'}")
+        console.print("Use dots credentials --show only in a private local terminal. Never paste into AI chat.")
+        return 0
+    if not sys.stdout.isatty() or not sys.stdin.isatty():
+        print("Credential reveal requires a private interactive terminal; redirection refused.", file=sys.stderr)
+        return 1
+    console.print("These secrets grant owner access. Do not record this terminal or paste into chat.")
+    if input("Type REVEAL to continue: ") != "REVEAL":return 1
+    secret = os.environ.get("MCP_PATH_SECRET") or (SECRET_FILE.read_text().strip() if SECRET_FILE.exists() else "not provisioned")
+    # Literal output prevents rich markup in user-owned configuration values.
+    print("Owner secret:", secret)
+    print("OAuth Client ID:", oauth.get("client_id", "not provisioned"))
+    print("OAuth Client secret:", oauth.get("client_secret", "not provisioned"))
     return 0
 
 
@@ -193,7 +254,14 @@ def cmd_status(args: argparse.Namespace) -> int:
         import urllib.request
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as r:
             info = json.loads(r.read().decode())
-        console.print(f"[{OK}]● running[/] port {port} · tools {info.get('tools')} · home {info.get('home')}")
+        if HAS_RICH:
+            table = Table("Service", "State", box=box.SIMPLE, show_header=False)
+            table.add_row("Server", f"running on 127.0.0.1:{port}")
+            table.add_row("Registered tools", str(info.get("tools", "unknown")))
+            table.add_row("Home", str(info.get("home", "unknown")))
+            console.print(Panel(table, title="dot-mcp status", border_style=OK))
+        else:
+            console.print(f"running port={port} tools={info.get('tools')}")
         return 0
     except Exception:
         console.print(f"[{ERR}]○ stopped[/] port {port} (no server)")
@@ -214,6 +282,11 @@ def cmd_stop(_: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import sys
+    route = list(sys.argv[1:] if argv is None else argv)
+    if route and route[0] == "vault":
+        from dot_mcp.vault import main as vault_main
+        return vault_main(route[1:])
     ap = argparse.ArgumentParser(prog="dot-mcp", description="dot-mcp personal agent CLI")
     sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("start", help="run MCP server + tunnel (runs in background)")
@@ -223,6 +296,12 @@ def main(argv: list[str] | None = None) -> int:
     q = sub.add_parser("status", help="check if the server is running")
     q.add_argument("--port", type=int, default=0, help="override port (default 33041)")
     sub.add_parser("stop", help="stop server + tunnel")
+    doctor = sub.add_parser("doctor", help="read-only runtime/package/tool-count diagnostics")
+    doctor.add_argument("--port", type=int, default=0)
+    doctor.add_argument("--json", action="store_true")
+    creds = sub.add_parser("credentials", help="inspect credential locations; --show reveals only in a private terminal")
+    creds.add_argument("--data-dir", default="")
+    creds.add_argument("--show", action="store_true")
     args = ap.parse_args(argv)
     if args.cmd == "start":
         return cmd_start(args)
@@ -230,6 +309,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status(args)
     if args.cmd == "stop":
         return cmd_stop(args)
+    if args.cmd == "doctor":
+        return cmd_doctor(args)
+    if args.cmd == "credentials":
+        return cmd_credentials(args)
     banner()
     console.print("Commands: [bold]start[/] · [bold]status[/] · [bold]stop[/]\nExample: [cyan]dot-mcp start[/]")
     return 0

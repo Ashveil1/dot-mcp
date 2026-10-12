@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Add optional dedicated Chromium profile with nine browser tools and masked PNG work artifacts
+- Add /live watch and human control with separate expiring capabilities plus owner-token authentication on every visit
+- Serialize human takeover against AI changes; revoke live capabilities on close
+- Stream latest-frame CDP JPEGs with actual FPS counters and a lower-rate screenshot fallback
 - Add durable SQLite tasks, checkpoints, command sessions, artifact references and results
 - Add async command start/status/cancel with streamed bounded output and idempotency keys
 - Add bootstrap_context for new-chat continuity and review-before-purge output retention
@@ -52,3 +56,30 @@
 **Docs**
 - README: env table, file layout, loud security + limitations section
 - `dots_tui.py` (unused TUI) and `.freebuff/` tracker removed
+
+### Local vault (experimental)
+- Add optional encrypted passphrase vault, human getpass CLI and locked-by-default server
+- Add names-only vault_list, exact-origin vault_fill and vault_lock tools
+- Pause live video and deny page snapshots/screenshots after fill until browser close
+- Document same-user full-shell and authorized-site risks; do not claim secret isolation
+
+### UI and credential output
+- Redesign OAuth consent page with clear owner-access warning and mobile layout
+- Add private-terminal credential reveal; hide startup credentials including JSON
+- Improve status panel and /live focus states, controls and accessible labels
+- Breaking: start --json no longer emits owner_secret/client_secret values
+
+### Live stream transport
+- Lower configurable JPEG quality/capture size while keeping browser viewport stable
+- Add bounded client frame ACK window and slow-client timeout
+- Show captured/received/displayed frame counters separately; preserve privacy-mode suppression
+
+### Diagnostics and test isolation
+- Add read-only doctor command for package/interpreter/live tool-count diagnostics
+- Split optional browser/vault tests so passphrase vault tests work without Playwright
+- Disable accidental Playwright debug env on the human-unlocked vault serve path
+- Reuse the locally provisioned owner credential for vault serve when no explicit owner env is set
+
+### Production vault leak checks
+- Exercise unlocked vault through real MCP transport; assert no dummy secret in outputs/server/audit logs
+- Fix Chromium Unix socket path overflow with a short private browser temp directory, cleaned on close
