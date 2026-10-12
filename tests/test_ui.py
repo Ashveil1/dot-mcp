@@ -54,6 +54,10 @@ def test_consent_csp_allows_only_validated_callback_origin():
 
 def test_start_vault_foreground_no_secret_handoff(tmp_path,monkeypatch):
     monkeypatch.setattr('sys.stdin.isatty',lambda:True)
+    monkeypatch.setattr(cli.ui,'_ensure_tunnl_key',lambda *a:tmp_path/'key')
+    monkeypatch.setattr(cli.ui,'_start_tunnl',lambda *a:'https://fixture.tunnl.gg')
+    monkeypatch.setattr(cli.ui,'_kill_tunnel',lambda *a:None)
+    monkeypatch.setenv('MCP_PUBLIC_HOST','fixture.tunnl.gg')
     monkeypatch.setenv('MCP_PORT','33041')
     monkeypatch.setenv('MCP_HOST','127.0.0.1')
     calls=[]
@@ -76,6 +80,6 @@ def test_start_vault_noninteractive_remains_locked(tmp_path,monkeypatch,capsys,t
     monkeypatch.setattr(cli,'_start_oauth_client',lambda *args:{'client_id':'fixture','client_secret':'fixture-client-not-output'})
     assert cli._cmd_start(argparse.Namespace(port=33043,data_dir=str(tmp_path),json=json_mode,vault=True))==0
     output=capsys.readouterr()
-    assert 'Vault remains locked' in output.err
+    assert 'No interactive vault prompt' in output.err
     assert 'fixture-owner-not-output' not in output.out+output.err
     assert 'fixture-client-not-output' not in output.out+output.err

@@ -1280,6 +1280,12 @@ if __name__ == "__main__":
     OAuthBearer.__name__ = "OAuthBearer"
     app.add_middleware(OAuthBearer)
     import uvicorn
+    # One attempt per boot, never on tool access (vault_lock/idle lock stay locked).
+    from dot_mcp.vault import ACTIVE_VAULT
+    if ACTIVE_VAULT is None:
+        from dot_mcp.vault_auto import unlock as auto_unlock
+        _VAULT = auto_unlock(DATA_DIR)
+    print("Vault: " + ("unlocked (human prompt)" if ACTIVE_VAULT is not None else "unlocked by local keyring opt-in" if _VAULT is not None else "locked"))
     _work_store()  # recover persistent command states before accepting requests
     sched_ensure()
     _oauth_static_client()  # ensure manual-connector credentials exist
@@ -1288,4 +1294,7 @@ if __name__ == "__main__":
     logging.getLogger("uvicorn").setLevel(logging.ERROR)
     logging.getLogger("uvicorn.error").setLevel(logging.ERROR)
     logging.getLogger("uvicorn.access").setLevel(logging.ERROR)
-    uvicorn.run(app, host=HOST, port=PORT, access_log=False, log_level="error")
+    try:
+        uvicorn.run(app, host=HOST, port=PORT, access_log=False, log_level="error")
+    finally:
+        if _VAULT is not None: _VAULT.close()

@@ -32,6 +32,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx"]
+vault-auto = ["cryptography>=44,<47", "secretstorage>=3.3,<4"]
 vault = ["cryptography>=44,<47"]
 browser = ["playwright>=1.50,<2", "websockets>=13,<17"]
 

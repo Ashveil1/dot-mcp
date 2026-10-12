@@ -492,26 +492,62 @@ logic, but discovery is not a successful launch test. Playwright and WebSocket
 packages are still required. The binary is reused, **not** your main browser
 profile or already-open tabs; dot-mcp retains its own profile and sandbox.
 
-Vault tools are present by default, but encryption requires a human key. No
-silent unlock has been added. After human `vault init` and `vault set`, you can
-use the regular start entry point in a private terminal:
+Vault tools are present by default; encryption still needs an initialized local
+vault. `dots start` now opens the stable-key tunnl.gg tunnel first, discovers its
+hostname, sets `MCP_PUBLIC_HOST` for the server and boots it once. No manually
+exported hostname or second tunnel terminal is required. The dedicated key and
+known-hosts file live in the local state directory. Keep that key to retain the
+provider's stable identity. Tunnel availability and the warning page still
+depend on tunnl.gg; "stable" does not promise uptime.
+
+For a manual local passphrase prompt and foreground lifetime:
 
 ```fish
-set -gx MCP_PUBLIC_HOST your-stable-public-host.tunnl.gg
-.venv/bin/python -m dot_mcp.cli start --vault --port 33041
-# In a second terminal, for the already-running server:
-.venv/bin/python -m dot_mcp.cli tunnel --port 33041
+.venv/bin/python -m dot_mcp.cli start --vault
 ```
 
-`start --vault` prompts locally with getpass and runs the server in the
-foreground, with no automatic tunnel or background child-key handoff. Keep the
-terminal open; Ctrl+C stops the server. The configured public hostname must
-match the tunnel, as before. Noninteractive or `--json` startup never prompts
-or unlocks: it follows normal detached startup with a locked vault and reports
-that choice on stderr. The passphrase is never an argument, chat message or
-environment value. Missing/uninitialized vault is a human setup step, not an
-automatic empty-vault creation. Idle auto-lock, exact origins, privacy mode and
-same-user shell limitations are unchanged.
+This starts its own tunnel. Keep the terminal open; Ctrl+C stops both. In
+noninteractive or JSON mode there is no prompt. A prior keyring opt-in may still
+unlock the detached server. Without opt-in/keyring, the vault remains locked.
+
+### One-time local vault auto-unlock opt-in (Linux Secret Service)
+
+After human `vault init`/`vault set`, install the optional auto-unlock dependency
+only if you choose to use it. On Arch, an unlocked Secret Service provider
+(e.g. the keyring used by your desktop) and its D-Bus session must be available
+in the server environment. No provider or package is installed by this command.
+
+```fish
+.venv/bin/python -m pip install -e '.[vault-auto]'
+.venv/bin/python -m dot_mcp.cli vault enable-auto
+.venv/bin/python -m dot_mcp.cli start
+```
+
+`enable-auto` requires a local terminal, shows a warning, asks you to type
+`ENABLE`, then prompts for the passphrase with getpass. It verifies the existing
+vault and stores the passphrase only in OS Secret Service. A private opt-in
+marker contains no secret. The server retrieves the secret directly on boot,
+never via arguments, environment, chat or a parent-to-child key handoff. There
+is no plaintext or alternate keyring backend fallback. Missing/locked keyring,
+missing opt-in, wrong secret or failed unlock leaves the vault locked. Server
+log reports only locked/unlocked status, not the passphrase.
+
+**Warning:** any same-user process with access to the unlocked OS keyring can
+retrieve this passphrase and unlock the vault. This is convenience on your own
+trusted machine, not a boundary against your shell or other same-user software.
+Idle auto-lock and `vault_lock` still lock; they do not automatically reopen on
+a later tool call. Restarting the server retries auto-unlock.
+
+```fish
+.venv/bin/python -m dot_mcp.cli vault disable-auto
+```
+
+Disabling removes the opt-in first and deletes the keyring entry. If the OS
+keyring is unavailable/locked, the command reports that credential deletion
+failed; unlock it locally and rerun. Auto-unlock remains disabled meanwhile.
+Stop/restart any already-unlocked server to drop its in-memory key. Exact-origin
+fill and post-fill privacy mode are unchanged. `dots tunnel` remains available
+for an already-running server; do not run a second tunnel for `dots start`.
 
 ### Missing browser dependencies
 

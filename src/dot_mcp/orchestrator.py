@@ -221,61 +221,42 @@ def _wait_health(port: int, timeout: int = 25) -> bool:
 
 
 def _ensure_tunnl_key(state_dir: Path):
+    from dot_mcp.tunnel import ensure_key
     if not shutil.which("ssh"):
-        raise RuntimeError("ssh not found — install OpenSSH first")
-    key_dir = state_dir / "ssh"
-    key_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(key_dir, 0o700)
-    key = key_dir / "id_ed25519"
-    if not (key.is_file() and (key_dir / "id_ed25519.pub").is_file()):
-        if not shutil.which("ssh-keygen"):
-            raise RuntimeError("ssh-keygen not found — install OpenSSH first")
-        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "",
-                        "-f", str(key), "-C", "dot-mcp-tunnl"], check=True)
-        os.chmod(key, 0o600)
-    return key
+        raise RuntimeError("not installed: ssh (OpenSSH); ask before installing")
+    return ensure_key(state_dir / "ssh")
 
 
-_TUNNL_RE = re.compile(r"https://[a-z-]+-[a-f0-9]+\.tunnl\.gg")
+from dot_mcp.tunnel import PUBLIC_URL as _TUNNL_RE
 
 
 def _start_tunnl(repo: Path, port: int, key: Path):
-    pidfile = repo / "logs" / "tunnl.pid"
+    from dot_mcp.tunnel import ssh_command
     lifecycle.stop(repo / "logs" / "tunnel.json")
     log = repo / "tunnel.log"
     log.parent.mkdir(parents=True, exist_ok=True)
-    with open(log, "wb"):
-        pass
+    fd = os.open(log, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    os.fchmod(fd, 0o600)
+    proc = None
     try:
-        os.chmod(log, 0o600)
-    except Exception:
-        pass
-    fh = open(log, "ab")
-    proc = subprocess.Popen(
-        ["ssh", "-tt", "-i", str(key), "-o", "IdentitiesOnly=yes",
-         "-o", "StrictHostKeyChecking=accept-new", "-o", "ServerAliveInterval=20",
-         "-o", "ServerAliveCountMax=3", "-R", f"80:127.0.0.1:{port}", "stable@proxy.tunnl.gg"],
-        stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
-    fh.close()
-    lifecycle.record(repo / "logs" / "tunnel.json", proc.pid)
-    pidfile.parent.mkdir(parents=True, exist_ok=True)
-    pidfile.write_text(str(proc.pid))
-    url = ""
-    end = time.time() + 45
-    while time.time() < end:
-        if proc.poll() is not None:
-            _kill_tunnel(repo)
-            raise RuntimeError("tunnel died — see tunnel.log: " + log.read_text()[-500:])
-        m = _TUNNL_RE.search(log.read_text(errors="replace"))
-        if m:
-            url = m.group(0)
-            break
-        time.sleep(1)
-    if not url:
-        _kill_proc(proc)
+        with os.fdopen(fd, "wb") as fh:
+            proc = subprocess.Popen(ssh_command(port, key, key.parent / "known_hosts"),
+                stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+        lifecycle.record(repo / "logs" / "tunnel.json", proc.pid)
+        end = time.monotonic() + 45
+        while time.monotonic() < end:
+            if proc.poll() is not None:
+                raise RuntimeError("tunnel exited; inspect private tunnel.log")
+            match = _TUNNL_RE.search(log.read_text(errors="replace"))
+            if match:
+                return match.group(0)
+            time.sleep(.2)
+        raise RuntimeError("tunnel URL unavailable after 45 seconds; inspect private tunnel.log")
+    except BaseException:
+        if proc is not None:
+            _kill_proc(proc)
         _kill_tunnel(repo)
-        raise RuntimeError("could not read URL from tunnel — see tunnel.log")
-    return url
+        raise
 
 
 def _public_init_ok(mcp_url: str, secret: str, timeout: int = 20, tries: int = 3) -> bool:
@@ -511,68 +492,18 @@ def _phase(steps: list, idx: int, tick, fn, fail_reason: str):
 
 
 def run_flow(ctx: StartCtx, state_dir: Path, live=None) -> FlowResult:
-
-    steps = [Step("Starting server"), Step("Opening tunnel"),
-             Step("Restarting for public host"), Step("Verifying endpoint")]
-    env = dict(ctx.env)
-    srv = _phase(steps, 0, live, lambda: _boot_server(ctx.py, env, ctx.repo, ctx.repo / "mcp.log"),
-                 "boot")[0]
-    if srv is None:
-        return FlowResult(False, reason="boot")
-    if not _wait_health(ctx.port):
-        _kill_proc(srv)
-        steps[0].state = "fail"
-        steps[0].detail = "no health — see mcp.log"
-        if tick:
-            tick()
-        return FlowResult(False, reason="health")
-
-    def _tun():
-        key = _ensure_tunnl_key(state_dir)
-        return _start_tunnl(ctx.repo, ctx.port, key)
-    url, ok = _phase(steps, 1, live, _tun, "tunnel")
-    if not ok:
-        _kill_proc(srv)
-        return FlowResult(False, reason="tunnel")
-    host = url.split("://", 1)[1]
-    public_mcp = f"{url}/mcp/"
-
-    def _reboot():
-        _kill_proc(srv)
-        end = time.time() + 20
-        while time.time() < end:
-            if not port_in_use(ctx.port):
-                break
-            time.sleep(1)
-        env["MCP_PUBLIC_HOST"] = host
-        srv2 = _boot_server(ctx.py, env, ctx.repo, ctx.repo / "mcp.log")
-        if not _wait_health(ctx.port):
-            _kill_proc(srv2)
-            raise RuntimeError("no health — see mcp.log")
-        return srv2
-    srv, ok = _phase(steps, 2, live, _reboot, "reboot")
-    if not ok:
-        return FlowResult(False, reason="reboot")
-
-    ok_flag = [False]
-
-    def _verify():
-        if not _public_init_ok(public_mcp, ctx.secret):
-            raise RuntimeError("public check failed — dots stop, then start again")
-        ok_flag[0] = True
-        return True
-    _, ok = _phase(steps, 3, live, _verify, "verify")
-    if not ok:
-        _kill_proc(srv)
-        return FlowResult(False, reason="verify")
-    return FlowResult(True, public_url=public_mcp, host=host, server_proc=srv)
+    # Retained UI entry point uses the same single-boot sequence.
+    class Quiet:
+        def print(self, *args):
+            if live: live()
+    return plain_flow(ctx, state_dir, Quiet(), leave_running=True)
 
 
 def plain_flow(ctx: StartCtx, state_dir: Path, console, leave_running: bool = False) -> FlowResult:
     """Clean up verified owned children on every failed startup path."""
     try:
         result = _plain_flow(ctx, state_dir, console, leave_running)
-    except Exception:
+    except BaseException:
         lifecycle.stop(ctx.repo / "logs" / "server.json")
         _kill_tunnel(ctx.repo)
         raise
@@ -583,49 +514,25 @@ def plain_flow(ctx: StartCtx, state_dir: Path, console, leave_running: bool = Fa
 
 
 def _plain_flow(ctx: StartCtx, state_dir: Path, console, leave_running: bool = False) -> FlowResult:
-    """Non-TTY sequential output (same phases, no Live).
-
-    Default: the verified server is stopped so the caller can exec it.
-    leave_running=True (for --json): the verified server keeps running in the
-    background; the proc is returned in the result.
-    """
-    console.print("Starting server…")
-    env = dict(ctx.env)
-    srv = _boot_server(ctx.py, env, ctx.repo, ctx.repo / "mcp.log")
-    if not _wait_health(ctx.port):
-        _kill_proc(srv)
-        console.print("[red]server did not come up — see mcp.log[/]")
-        return FlowResult(False, reason="health")
-    console.print("Opening tunnel…")
-    try:
-        url = _start_tunnl(ctx.repo, ctx.port, _ensure_tunnl_key(state_dir))
-    except RuntimeError as e:
-        _kill_proc(srv)
-        console.print(f"[red]{e}[/]")
-        return FlowResult(False, reason="tunnel")
+    """Discover stable hostname first, then boot once with correct issuer."""
+    console.print("Opening stable tunnel...")
+    url = _start_tunnl(ctx.repo, ctx.port, _ensure_tunnl_key(state_dir))
     host = url.split("://", 1)[1]
-    console.print("Restarting server for the new public host…")
-    _kill_proc(srv)
-    if not _wait_port_free(ctx.port):
-        console.print(f"[red]port {ctx.port} never freed — see mcp.log[/]")
-        return FlowResult(False, reason="reboot")
-    env["MCP_PUBLIC_HOST"] = host
+    env = dict(ctx.env, MCP_PUBLIC_HOST=host)
+    ctx.env["MCP_PUBLIC_HOST"] = host
+    console.print("Starting server...")
     srv = _boot_server(ctx.py, env, ctx.repo, ctx.repo / "mcp.log")
     if not _wait_health(ctx.port):
         _kill_proc(srv)
-        console.print("[red]server did not come up on retry — see mcp.log[/]")
-        return FlowResult(False, reason="reboot")
-    console.print("Verifying public endpoint…")
-    if not _public_init_ok(f"{url}/mcp/", ctx.secret):
+        return FlowResult(False, reason="health")
+    if not _tunnel_alive(ctx.repo) or not _public_init_ok(url + "/mcp/", ctx.secret):
         _kill_proc(srv)
-        console.print("[red]public check failed — run dots stop then start again[/]")
         return FlowResult(False, reason="verify")
     if leave_running:
-        return FlowResult(True, public_url=f"{url}/mcp/", host=host,
-                          server_proc=srv, started_at=time.monotonic())
+        return FlowResult(True, public_url=url + "/mcp/", host=host, server_proc=srv)
     _kill_proc(srv)
     _wait_port_free(ctx.port)
-    return FlowResult(True, public_url=f"{url}/mcp/", host=host)
+    return FlowResult(True, public_url=url + "/mcp/", host=host)
 
 
 def json_result(ok: bool, ctx: StartCtx, res: FlowResult, oauth: dict) -> str:

@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Open stable-key tunnel first and set server public hostname automatically with one boot
+- Add local Secret Service enable-auto/disable-auto opt-in; no keyring means locked, no plaintext fallback
+
 - Return clear not_installed browser dependency results; ask before installing, never install silently
 - Check server-interpreter Playwright/websockets and executable availability, with managed Chromium fallback
 

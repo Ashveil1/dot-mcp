@@ -128,15 +128,19 @@ def _cmd_start(args: argparse.Namespace) -> int:
     data_dir = args.data_dir or DEFAULT_DATA
     if getattr(args, "vault", False):
         if args.json or not sys.stdin.isatty():
-            print("Vault remains locked in noninteractive/JSON startup; use a private local terminal to unlock.", file=sys.stderr)
+            print("No interactive vault prompt in noninteractive/JSON startup; only prior local keyring opt-in can unlock.", file=sys.stderr)
         else:
             from dot_mcp.vault import main as vault_main
-            console.print("Starting foreground with a local vault prompt. No tunnel is started; use dots tunnel in another terminal. Ctrl+C stops this server.")
+            console.print("Starting stable tunnel and foreground server with a local vault prompt. Ctrl+C stops both.")
             os.environ["MCP_PORT"] = str(port)
             os.environ["MCP_HOST"] = "127.0.0.1"
-            # Public issuer must be configured by the human before boot. The
-            # passphrase stays in this foreground process, never child env/args.
-            return vault_main(["serve", "--data-dir", str(Path(data_dir).resolve())])
+            try:
+                url = ui._start_tunnl(REPO, port, ui._ensure_tunnl_key(STATE_DIR))
+                os.environ["MCP_PUBLIC_HOST"] = url.split("://", 1)[1]
+                console.print("Public URL: " + url + "/mcp/")
+                return vault_main(["serve", "--data-dir", str(Path(data_dir).resolve())])
+            finally:
+                ui._kill_tunnel(REPO)
     # Owner secret: stable per machine (env wins, else file, else generate+save).
     secret = (os.environ.get("MCP_PATH_SECRET", "").strip() or get_secret())
     py, src_dir = server_python()
@@ -187,7 +191,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
     oauth = _start_oauth_client(data_dir)
     t = Table("", "", box=box.SIMPLE, show_header=False)
     t.add_row("Public URL", public_mcp)
-    t.add_row("Browser + vault", "optional installs; vault locked by default")
+    t.add_row("Browser + vault", "optional installs; vault locked unless local keyring opt-in")
     t.add_row("Owner secret", "hidden (use dots credentials --show locally)")
     t.add_row("OAuth Client ID", oauth.get("client_id", "—"))
     t.add_row("OAuth Client secret", "hidden")
@@ -309,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=0, help="override port (default 33041)")
     p.add_argument("--data-dir", default="", help="override data dir (default ~/.dot-mcp)")
     p.add_argument("--json", action="store_true", help="script mode: JSON result, server left running")
-    p.add_argument("--vault", action="store_true", help="human local unlock + foreground server (no automatic tunnel); noninteractive stays locked")
+    p.add_argument("--vault", action="store_true", help="human local unlock + foreground server/tunnel; JSON uses prior keyring opt-in only")
     q = sub.add_parser("status", help="check if the server is running")
     q.add_argument("--port", type=int, default=0, help="override port (default 33041)")
     sub.add_parser("stop", help="stop server + tunnel")
