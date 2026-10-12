@@ -418,7 +418,9 @@ class WorkStore:
     def ack_result(self, result_id):
         with self.connection() as c:
             changed = c.execute("UPDATE inbox SET acked=1 WHERE id=?", (int(result_id),)).rowcount
-            return {"ok": bool(changed)}
+            if not changed:
+                raise ValueError("unknown result id")
+            return {"ok": True}
 
     def purge_output(self, sid):
         status = self.status(sid)

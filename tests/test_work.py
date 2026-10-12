@@ -139,6 +139,12 @@ def test_purge_needs_review_and_keeps_metadata(work):
     assert store.status(sid)["state"] == "completed"
 
 
+def test_ack_unknown_result_rejected(work):
+    store, _ = work
+    with pytest.raises(ValueError, match="unknown result id"):
+        store.ack_result(999999)
+
+
 def test_restart_marks_unverified_command_interrupted(tmp_path):
     data = tmp_path / "data"
     store = WorkStore(data, lambda p: tmp_path, lambda: "/bin/sh")
@@ -290,7 +296,7 @@ def test_mcp_tool_demo_across_two_client_sessions(tmp_path):
                 async with ClientSession(streams[0], streams[1]) as session:
                     await session.initialize()
                     defs = await session.list_tools()
-                    assert len(defs.tools) == 46
+                    assert len(defs.tools) == 51
                     task = await call(session, "create_work_task", {"title": "Write a greeting script"})
                     command = "printf 'print(\"hello\")\\n' > greeting.py; python3 greeting.py"
                     started = await call(session, "start_command", {"command": command, "task_id": task["id"], "idempotency_key": "mcp-demo"})

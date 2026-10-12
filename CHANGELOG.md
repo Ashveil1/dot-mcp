@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+- Browser control for AI: new `browser_hover`, `browser_select` (dropdown
+  label/value with safe option listing), `browser_wait` (text/selector up to
+  30s, returns a fresh snapshot), `browser_back`, `browser_reload`
+- Snapshots now report `disabled`, `checked`/`selected`, ARIA `role`,
+  input `value` and the current `selected_option` for dropdowns
+- `/live` page: auto-reconnect with backoff (capability kept in
+  sessionStorage, never stored credentials), current-domain display that
+  updates on navigation, fullscreen view
+- Live `ready` packet reports the current domain; viewers are notified on
+  domain change
+- Reject empty/oversize inputs consistently: `remember`, `notify_user`,
+  `add_update`, legacy `add_task`, `add_schedule` now raise typed
+  `bad_argument` errors instead of storing junk records
+- `ack_work_result` on an unknown id now returns typed `not_found`
+  (`result_id`) instead of silent `ok: false`
+
 ## 0.2.3
 - Report typed, safe tool error causes consistently under MCP 1 and 2 without echoing raw exceptions or argument values
 

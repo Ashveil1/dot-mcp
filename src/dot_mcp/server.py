@@ -488,6 +488,8 @@ def edit_file(path: str, match_text: str, write_text: str, mode: Literal["replac
 @tool()
 def remember(note: str, tag: str = "general") -> dict:
     """Save persistent memory (dot-like notes). Survives across chats. Dedupes identical note+tag."""
+    if not note.strip() or len(note) > 20000:
+        raise ValueError("memory note must be nonempty and at most 20000 chars")
     def _add(mem):
         if not isinstance(mem, list):
             mem = []
@@ -533,6 +535,8 @@ def set_goal(goal: str) -> dict:
 @tool()
 def add_update(text: str) -> dict:
     """Append progress update (dot works between conversations)."""
+    if not text.strip() or len(text) > 20000:
+        raise ValueError("update text must be nonempty and at most 20000 chars")
     def _add(st):
         if not isinstance(st, dict):
             st = {}
@@ -553,6 +557,8 @@ def get_state() -> dict:
 @tool()
 def add_task(title: str, detail: str = "") -> dict:
     """Add todo task."""
+    if not title.strip() or len(title) > 500 or len(detail) > 20000:
+        raise ValueError("task needs a title up to 500 chars and detail up to 20000 chars")
     def _add(st):
         if not isinstance(st, dict):
             st = {}
@@ -581,6 +587,8 @@ def complete_task(tid: str) -> dict:
 @tool()
 def notify_user(text: str, kind: str = "progress") -> dict:
     """Leave a message in the inbox (dot messages you with progress/questions/decisions). Client polls via poll_inbox."""
+    if not text.strip() or len(text) > 20000:
+        raise ValueError("notification text must be nonempty and at most 20000 chars")
     return inbox_push(kind, text)
 
 @tool()
@@ -597,6 +605,8 @@ def ack_inbox(iid: str) -> dict:
 def add_schedule(name: str, command: str, interval_seconds: int = 3600, cwd: str = "~") -> dict:
     """Recurring background job (dot proactive work). Runs even between chats, result goes to inbox."""
     if interval_seconds < 60: raise ValueError("minimum interval 60s")
+    if not name.strip() or not command.strip() or len(command) > 64000:
+        raise ValueError("schedule needs a nonempty name and command up to 64000 chars")
     def _add(jobs):
         if not isinstance(jobs, list):
             jobs = []
@@ -785,6 +795,31 @@ def browser_scroll(x: int = 0, y: int = 600) -> dict:
 def browser_key(key: str) -> dict:
     """Press a navigation/editing key such as Enter or Tab. May submit forms; review first."""
     return _browser_call("key", key=key)
+
+@tool()
+def browser_hover(ref: str) -> dict:
+    """Hover a fresh snapshot ref to reveal menus/tooltips. Verify with a new snapshot."""
+    return _browser_call("hover", ref=ref)
+
+@tool()
+def browser_select(ref: str, option: str) -> dict:
+    """Choose a dropdown option by visible label or value. Take a snapshot first for the ref."""
+    return _browser_call("select", ref=ref, option=option)
+
+@tool()
+def browser_wait(text: str = "", selector: str = "", timeout: int = 10) -> dict:
+    """Wait up to 30s for text or a CSS selector (dynamic pages), then return a fresh snapshot."""
+    return _browser_call("wait", text=text, selector=selector, timeout=timeout)
+
+@tool()
+def browser_back() -> dict:
+    """Go back one history entry. Take a fresh snapshot to verify."""
+    return _browser_call("back")
+
+@tool()
+def browser_reload() -> dict:
+    """Reload the current page. Take a fresh snapshot to verify."""
+    return _browser_call("reload")
 
 @tool()
 def browser_screenshot(task_id: str = "") -> dict:

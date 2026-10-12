@@ -26,7 +26,7 @@ def test_production_app_auth_and_mcp_initialize(tmp_path):
         for _ in range(100):
             try:
                 with urlopen(base + "/health", timeout=0.2) as r:
-                    assert json.load(r)["tools"] == 46
+                    assert json.load(r)["tools"] == 51
                 break
             except OSError:
                 if child.poll() is not None:

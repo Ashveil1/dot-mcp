@@ -24,6 +24,34 @@ def test_unknown_errors_never_echo_private_text():
     assert json.loads(str(error))["error"]["code"] == "not_found"
 
 
+def test_input_validation_maps_to_typed_errors():
+    cases = [
+        ("memory note must be nonempty and at most 20000 chars", "bad_argument", "note"),
+        ("notification text must be nonempty and at most 20000 chars", "bad_argument", "text"),
+        ("update text must be nonempty and at most 20000 chars", "bad_argument", "text"),
+        ("schedule needs a nonempty name and command up to 64000 chars", "bad_argument", "command"),
+        ("unknown result id", "not_found", "result_id"),
+    ]
+    for message, code, field in cases:
+        body = json.loads(str(safe_failure(ValueError(message))))
+        assert body["error"]["code"] == code, message
+        assert body["error"]["field"] == field, message
+
+
+def test_browser_errors_map_to_typed_causes():
+    cases = [
+        ("target must be a select dropdown; use browser_type for x", "bad_argument", "ref"),
+        ("no such option; choose one of: Alpha", "not_found", "option"),
+        ("option must be a nonempty label or value up to 500 chars", "bad_argument", "option"),
+        ("wait needs text or a CSS selector to wait for", "bad_argument", None),
+        ("timed out after 5s waiting for text foo", "not_found", None),
+    ]
+    for message, code, field in cases:
+        body = json.loads(str(safe_failure(ValueError(message))))
+        assert body["error"]["code"] == code, message
+        assert body["error"].get("field") == field, message
+
+
 def test_decorator_preserves_signature_and_safe_exception():
     import inspect
     @safe_tool

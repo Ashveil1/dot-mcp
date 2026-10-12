@@ -14,8 +14,8 @@ from starlette.testclient import TestClient
 from dot_mcp.browser import LocalBrowser, BrowserError
 from dot_mcp.live import routes
 
-HTML = b'''<!doctype html><title>Browser test</title><style>body{font:24px system-ui;padding:30px;background:#eee}canvas{background:#123}input{font:24px system-ui}#hold{padding:25px}#space{height:1800px}</style><h1>Local browser fixture</h1><input name="message" placeholder="message"><input type="password" name="password"><button id="hold">Hold here</button><div id="out">ready</div><canvas id="anim" width="600" height="160"></canvas><div id="space">Scroll test</div><script>
-let n=0;let c=anim.getContext('2d');function draw(){c.fillStyle='#123';c.fillRect(0,0,600,160);c.fillStyle='#7cf';c.fillRect((n++*3)%550,30,50,60);requestAnimationFrame(draw)}draw();hold.onpointerdown=()=>out.textContent='down';hold.onpointerup=()=>out.textContent='up';document.querySelector('[name=message]').oninput=e=>out.textContent='typed:'+e.target.value;
+HTML = b'''<!doctype html><title>Browser test</title><style>body{font:24px system-ui;padding:30px;background:#eee}canvas{background:#123}input{font:24px system-ui}#hold{padding:25px}#space{height:1800px}</style><h1>Local browser fixture</h1><input name="message" placeholder="message"><input type="password" name="password"><input type="checkbox" name="agree"><button id="hold">Hold here</button><button id="off" disabled>Off</button><select name="choice"><option value="a">Alpha</option><option value="b">Beta</option></select><div id="out">ready</div><div id="late"></div><canvas id="anim" width="600" height="160"></canvas><div id="space">Scroll test</div><script>
+let n=0;let c=anim.getContext('2d');function draw(){c.fillStyle='#123';c.fillRect(0,0,600,160);c.fillStyle='#7cf';c.fillRect((n++*3)%550,30,50,60);requestAnimationFrame(draw)}draw();hold.onpointerdown=()=>out.textContent='down';hold.onpointerup=()=>out.textContent='up';document.querySelector('[name=message]').oninput=e=>out.textContent='typed:'+e.target.value;setTimeout(()=>late.textContent='arrived',1500);
 </script>'''
 
 @pytest.fixture
@@ -43,6 +43,49 @@ def browser(tmp_path, monkeypatch):
 
 def find(snapshot,label):
     return next(x['ref'] for x in snapshot['elements'] if x['label']==label)
+
+
+def test_snapshot_reports_element_state(browser,local_page):
+    browser.call('open',url=local_page)
+    snap=browser.call('snapshot')
+    by_label={x['label']:x for x in snap['elements']}
+    assert by_label['Off']['disabled'] is True
+    assert by_label['Hold here']['disabled'] is False
+    box=next(x for x in snap['elements'] if x['tag']=='input' and x.get('type')=='checkbox')
+    assert box['checked'] is False
+    sel=next(x for x in snap['elements'] if x['tag']=='select')
+    assert sel['selected_option']=='Alpha'
+    browser.call('click',ref=box['ref'])
+    snap2=browser.call('snapshot')
+    box2=next(x for x in snap2['elements'] if x['tag']=='input' and x.get('type')=='checkbox')
+    assert box2['checked'] is True
+
+
+def test_select_hover_wait_back_reload(browser,local_page):
+    browser.call('open',url=local_page)
+    snap=browser.call('snapshot')
+    sel=next(x for x in snap['elements'] if x['tag']=='select')
+    picked=browser.call('select',ref=sel['ref'],option='Beta')
+    assert picked['selected']=='Beta'
+    snap=browser.call('snapshot')
+    sel2=next(x for x in snap['elements'] if x['tag']=='select')
+    assert sel2['selected_option']=='Beta'
+    with pytest.raises(BrowserError,match='no such option'):
+        browser.call('select',ref=sel2['ref'],option='Gamma')
+    msg=find(browser.call('snapshot'),'message')
+    with pytest.raises(BrowserError,match='select dropdown'):
+        browser.call('select',ref=msg,option='Beta')
+    hovered=browser.call('hover',ref=find(browser.call('snapshot'),'Hold here'))
+    assert 'fresh snapshot' in hovered['note']
+    waited=browser.call('wait',text='arrived',timeout=10)
+    assert 'arrived' in waited['text']
+    with pytest.raises(BrowserError,match='timed out after'):
+        browser.call('wait',text='never-comes-xyz',timeout=1)
+    browser.call('navigate',url=local_page+'#second')
+    back=browser.call('back')
+    assert back['url']==local_page or back['url'].rstrip('/')==local_page.rstrip('/')
+    reloaded=browser.call('reload')
+    assert 'fresh snapshot' in reloaded['note']
 
 
 def test_tools_profile_secrets_screenshot(browser,local_page):
@@ -207,6 +250,16 @@ def test_password_free_view_opt_in_control_still_requires_owner(browser,local_pa
         with pytest.raises(WebSocketDisconnect):
             with client.websocket_connect('/live/ws',headers={'origin':'http://testserver'}) as denied:
                 denied.send_json({'token':browser.tokens['view']});denied.receive_json()
+
+
+def test_live_ready_reports_domain(browser,local_page):
+    browser.call('open',url=local_page)
+    app=Starlette(routes=routes(lambda create=False:browser,lambda:'http://testserver',lambda token:token=='fixture-owner'))
+    with TestClient(app) as client:
+        with client.websocket_connect('/live/ws',headers={'origin':'http://testserver'}) as view:
+            view.send_json({'token':browser.tokens['view'],'credential':'fixture-owner'})
+            ready=receive_type(view,'ready')
+            assert ready['domain']=='127.0.0.1'
 
 
 def test_revoke_disconnects_connected_password_free_view(browser,local_page):

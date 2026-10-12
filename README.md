@@ -85,7 +85,7 @@ requires the normal local vault unlock.
 
 Cloudflare docs: https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/
 
-## What it can do (33 tools in this development revision)
+## What it can do (51 tools in this development revision)
 
 - **Shell:** `run_command` (background sessions + timeout) + `read_output`
 - **Files:** `list_dir`, `read_file` (paged + sha256), `write_file`
@@ -96,6 +96,11 @@ Cloudflare docs: https://developers.cloudflare.com/tunnel/get-started/quick-tunn
 - **Inbox:** `notify_user`, `poll_inbox`, `ack_inbox` — messages across chats
 - **Scheduler:** `add_schedule`, `list_schedules`, `remove_schedule` —
   background jobs that run between chats
+- **Browser:** `browser_open/navigate/snapshot/click/type/scroll/key/screenshot/close`
+  + `browser_hover/select/wait/back/reload` — snapshots report disabled,
+  checked and selected-option state; `wait` handles dynamic pages
+- **Live:** `/live` auto-reconnects (sessionStorage capability), shows the
+  current domain, fullscreen view; control still requires the owner token
 - **UI:** `open_workspace` — embedded dashboard (tasks, memory, sessions)
 
 ## Durable work (development revision)
@@ -379,7 +384,8 @@ Chromium availability is a lead, not a successful launch test.
 
 After applying patches, restart the running Python server. Editing files does
 not reload the old process. Round 3 alone registers 42 tools; Round 4 vault adds
-3 for 45. Check `dots status` or live `/health`, then reconnect/refresh the
+3 for 45; the browser-control round adds hover/select/wait/back/reload for 51.
+Check `dots status` or live `/health`, then reconnect/refresh the
 assistant's connector tool list. Importing server code in a separate shell
 only checks files, not the server already running. Never work around missing
 browser_* tools with a separate Python process: its browser/tokens are not

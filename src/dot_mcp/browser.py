@@ -75,6 +75,7 @@ class LocalBrowser:
         self.frames = 0
         self.started = 0
         self.last_frame = None
+        self.live_domain = None
         self.expires = 0
         self.operation_lock = None
         self.browser_tmp = None
@@ -183,6 +184,7 @@ class LocalBrowser:
             self.started = time.monotonic()
             self.frames = 0
             self.last_frame = None
+            self.live_domain = None
             try:
                 self.cdp = await self.context.new_cdp_session(self.page)
                 cdp = self.cdp
@@ -204,8 +206,20 @@ class LocalBrowser:
             await self._close()
             raise BrowserError(str(exc)[:1000]) from None
 
+    def _publish_domain(self):
+        try:
+            host = urlsplit(self.page.url).hostname or "" if self.page else ""
+        except Exception:
+            host = ""
+        if host != self.live_domain:
+            self.live_domain = host
+            for q in list(self.clients.values()):
+                if q.full(): q.get_nowait()
+                q.put_nowait({"type": "domain", "value": host})
+
     def _publish_frame(self, data):
         if self.sensitive: return
+        self._publish_domain()
         self.frames += 1
         packet = {"type": "frame", "data": data, "width": 1280, "height": 720, "sequence": self.frames,
                   "captured_fps": round(self.frames / max(0.001, time.monotonic()-self.started), 2)}
@@ -244,8 +258,11 @@ class LocalBrowser:
         for i in range(min(await locators.count(), 100)):
             el = locators.nth(i)
             if not await el.is_visible(): continue
-            info = await el.evaluate("el => ({tag:el.tagName.toLowerCase(),type:el.getAttribute('type')||'',label:el.getAttribute('aria-label')||el.getAttribute('placeholder')||el.innerText||el.getAttribute('name')||'',href:el.tagName==='A'?el.href:null})")
+            info = await el.evaluate("""el => ({tag:el.tagName.toLowerCase(),type:el.getAttribute('type')||'',role:el.getAttribute('role')||'',label:el.getAttribute('aria-label')||el.getAttribute('placeholder')||el.innerText||el.getAttribute('name')||'',href:el.tagName==='A'?el.href:null,disabled:!!el.disabled,checked:!!(el.checked),selected:el.tagName==='OPTION'?!!el.selected:null,value:('value' in el)?String(el.value??'').slice(0,120):null})""")
             if info["type"].lower() == "password": info["label"] = "password (manual entry only)"
+            if info["tag"] == "select":
+                try: info["selected_option"] = await el.evaluate("el => el.options[el.selectedIndex] ? el.options[el.selectedIndex].text.slice(0,120) : ''")
+                except Exception: info["selected_option"] = ""
             ref = f"b{self.generation}-{i}"
             self.refs[ref] = await el.element_handle()
             elements.append({"ref": ref, **{k: v[:500] if isinstance(v, str) else v for k, v in info.items()}})
@@ -289,13 +306,67 @@ class LocalBrowser:
         self._invalidate()
         return {"url": self.page.url, **await self._links()}
 
+    async def _back(self):
+        self._ready()
+        await self.page.go_back(wait_until="domcontentloaded")
+        self._invalidate()
+        self._url(self.page.url)
+        return {"url": self.page.url, "title": await self.page.title(), **await self._links(),
+                "note": "Went back; take a fresh snapshot to verify."}
+
+    async def _reload(self):
+        self._ready()
+        await self.page.reload(wait_until="domcontentloaded")
+        self._invalidate()
+        return {"url": self.page.url, "title": await self.page.title(), **await self._links(),
+                "note": "Reloaded; take a fresh snapshot to verify."}
+
     async def _key(self, key):
         self._ready()
-        allowed = {"Enter", "Tab", "Escape", "Backspace", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"}
+        allowed = {"Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown", "Shift", "Control", "Alt"}
         if key not in allowed: raise BrowserError("unsupported key")
         await self.page.keyboard.press(key)
         self._invalidate()
         return {"url": self.page.url, **await self._links()}
+
+    async def _hover(self, ref):
+        el = await self._target(ref)
+        await el.hover()
+        self._invalidate()
+        return {"url": self.page.url, **await self._links(), "note": "Hovered; take a fresh snapshot to verify menus/tooltips."}
+
+    async def _select(self, ref, option):
+        el = await self._target(ref)
+        tag = await el.evaluate("el => el.tagName.toLowerCase()")
+        if tag != "select": raise BrowserError("target must be a select dropdown; use browser_type for text inputs")
+        if not isinstance(option, str) or not option.strip() or len(option) > 500:
+            raise BrowserError("option must be a nonempty label or value up to 500 chars")
+        options = await el.evaluate("el => Array.from(el.options).map(o => ({label:o.text,value:o.value}))")
+        match = next((o for o in options if o["label"].strip() == option.strip() or o["value"] == option), None)
+        if match is None:
+            raise BrowserError(f"no such option; choose one of: {', '.join(o['label'][:40] for o in options[:10]) or '(empty dropdown)'}"[:500])
+        await el.select_option(value=match["value"])
+        self._invalidate()
+        return {"url": self.page.url, "selected": match["label"], **await self._links(), "note": "Option selected; take a fresh snapshot to verify."}
+
+    async def _wait(self, text="", selector="", timeout=10):
+        self._ready()
+        if not isinstance(text, str) or not isinstance(selector, str):
+            raise BrowserError("text and selector must be strings")
+        if not text.strip() and not selector.strip():
+            raise BrowserError("wait needs text or a CSS selector to wait for")
+        try:
+            timeout_ms = max(1000, min(int(timeout) * 1000, 30000))
+        except (ValueError, TypeError):
+            raise BrowserError("timeout must be 1..30 seconds") from None
+        try:
+            if selector.strip():
+                await self.page.locator(selector.strip()).first.wait_for(timeout=timeout_ms)
+            else:
+                await self.page.get_by_text(text.strip()).first.wait_for(timeout=timeout_ms)
+        except Exception:
+            raise BrowserError(f"timed out after {timeout_ms // 1000}s waiting for {('selector ' + selector.strip()) if selector.strip() else ('text ' + text.strip()[:100])}") from None
+        return await self._snapshot()
 
     async def _screenshot(self, task_id=""):
         self._ready()
@@ -350,6 +421,13 @@ class LocalBrowser:
         for role, expected in self.tokens.items():
             if secrets.compare_digest(token, expected): return role
         return None
+
+    async def current_domain(self):
+        self._ready()
+        try:
+            return urlsplit(self.page.url).hostname or ""
+        except Exception:
+            return ""
 
     async def connect(self, token, client_id):
         role = self.authorize(token)
@@ -435,5 +513,6 @@ class LocalBrowser:
         if self.browser_tmp: self.browser_tmp.cleanup(); self.browser_tmp = None
         self.sensitive = False
         self.last_frame = None
+        self.live_domain = None
         self._invalidate()
         return {"closed": True, "note": "All live capabilities revoked. Dedicated profile retained."}

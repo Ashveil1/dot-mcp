@@ -123,6 +123,17 @@ def test_remember_dedupes():
     assert a["id"] == b["id"]
 
 
+def test_empty_inputs_rejected():
+    for fn in (lambda: srv.remember("  "),
+               lambda: srv.notify_user(""),
+               lambda: srv.add_update("  "),
+               lambda: srv.add_task("   "),
+               lambda: srv.add_schedule("  ", "echo x"),
+               lambda: srv.add_schedule("n", "   ")):
+        with pytest.raises(ValueError):
+            fn()
+
+
 def test_add_schedule_enforces_minimum():
     with pytest.raises(ValueError):
         srv.add_schedule("fast", "echo", 5)
