@@ -284,6 +284,9 @@ def cmd_stop(_: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     import sys
     route = list(sys.argv[1:] if argv is None else argv)
+    if route and route[0] == "tunnel":
+        from dot_mcp.tunnel import main as tunnel_main
+        return tunnel_main(route[1:])
     if route and route[0] == "vault":
         from dot_mcp.vault import main as vault_main
         return vault_main(route[1:])

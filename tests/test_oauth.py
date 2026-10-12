@@ -204,3 +204,22 @@ def test_token_response_is_not_cacheable(oauth):
 def test_metadata_advertises_supported_client_auth():
     assert set(srv._oauth_metadata()["token_endpoint_auth_methods_supported"]) == {
         "none", "client_secret_basic", "client_secret_post"}
+
+
+def test_proxy_headers_cannot_change_issuer_or_origin(oauth,monkeypatch):
+    monkeypatch.setattr(srv,'_issuer',lambda:'https://fixture-abcd.tunnl.gg')
+    client=srv._oauth_static_client()['client_id']
+    fields={'client_id':client,'redirect_uri':'https://chatgpt.com/connector/oauth/fixture','response_type':'code','scope':srv.OAUTH_SCOPE,'owner_secret':srv.SECRET,'state':'fixture'}
+    headers={'Host':'localhost:33041','X-Forwarded-Host':'evil.test','X-Forwarded-Proto':'http','Origin':'https://fixture-abcd.tunnl.gg'}
+    consent=oauth.get('/authorize',params={k:v for k,v in fields.items() if k!='owner_secret'},headers=headers)
+    assert consent.status_code==200
+    assert "form-action 'self' https://chatgpt.com" in consent.headers['content-security-policy']
+    # Provider warning cookie is transport data, never an owner-auth bypass.
+    approved=oauth.post('/authorize',data=fields,headers=dict(headers,Cookie='tunnl-warning=accepted'))
+    assert approved.status_code==302
+    assert approved.headers['location'].startswith('https://chatgpt.com/connector/oauth/fixture?')
+    for invalid in ('http://fixture-abcd.tunnl.gg','https://fixture-abcd.tunnl.gg:444','https://evil.test','null'):
+        denied=oauth.post('/authorize',data=fields,headers=dict(headers,Origin=invalid))
+        assert denied.status_code==403
+    denied=oauth.post('/authorize',data=dict(fields,owner_secret='wrong'),headers=headers)
+    assert denied.status_code==403

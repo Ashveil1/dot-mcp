@@ -146,3 +146,21 @@ def test_stream_config_bounds(tmp_path,monkeypatch):
     b=LocalBrowser(tmp_path,'http://testserver')
     assert b.stream_quality==85 and b.stream_width==640
     b.loop.call_soon_threadsafe(b.loop.stop);b.thread.join(timeout=3)
+
+
+def test_live_proxy_warning_cookie_never_bypasses_auth(browser,local_page):
+    from starlette.websockets import WebSocketDisconnect
+    browser.base_url='https://fixture-abcd.tunnl.gg'
+    browser.call('open',url=local_page)
+    app=Starlette(routes=routes(lambda create=False:browser,lambda:'https://fixture-abcd.tunnl.gg',lambda token:token=='fixture-owner'))
+    with TestClient(app) as client:
+        headers={'origin':'https://fixture-abcd.tunnl.gg','host':'localhost:33041','x-forwarded-host':'evil.test','x-forwarded-proto':'http','cookie':'tunnl-warning=accepted'}
+        assert client.get('/live',headers=headers).status_code==200
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect('/live/ws',headers=headers) as ws:
+                ws.send_json({'token':browser.tokens['view']});ws.receive_json()
+        with client.websocket_connect('/live/ws',headers=headers) as ws:
+            ws.send_json({'token':browser.tokens['view'],'credential':'fixture-owner'})
+            assert receive_type(ws,'ready')['role']=='view'
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect('/live/ws',headers=dict(headers,origin='https://evil.test')):pass
