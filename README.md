@@ -363,3 +363,119 @@ The OAuth consent CSP permits the validated callback HTTPS origin as well as
 following a POST; restricting it to `self` alone blocked successful OAuth
 callbacks. This allowance is generated from the already-validated redirect,
 not a wildcard, and does not replace owner-secret/redirect/PKCE verification.
+
+## Stable public URLs and a tunnel-only helper
+
+A running Python server does not learn a new public hostname just because a
+tunnel was opened. Set `MCP_PUBLIC_HOST` to the canonical HTTPS hostname before
+server boot. OAuth issuer/resource URLs, DNS-rebinding allowed hosts and /live
+WebSocket Origin checks all use that configuration. Restart/reconnect is needed
+when the hostname changes. Caller-controlled Host/X-Forwarded-Host headers do
+not choose the issuer or authorize a new origin. Never disable these checks
+just to make a proxy work. Consent Origin/Referer checks compare exact scheme,
+host and port; proxy warning cookies do not authenticate the owner.
+
+### tunnl.gg stable (no account)
+
+`dots tunnel` runs a foreground stable-key SSH tunnel to an **already-running**
+healthy loopback server. It does not start/restart the server or rewrite its
+OAuth config. Stdout contains only the non-secret base URL and `/mcp/` URL;
+provider banners are saved in a private tunnel log. Ctrl+C stops this helper's
+SSH child, not the server. It does not reconnect endlessly or bypass provider
+limits. OpenSSH is required. By default it creates a dedicated private key in
+`~/.dot-mcp/tunnel/tunnl-key`; keep that same key to retain the stable URL.
+
+Fish-friendly helper and equivalent manual command:
+
+```fish
+.venv/bin/python -m dot_mcp.cli tunnel --port 33041
+# Existing dedicated SSH key:
+.venv/bin/python -m dot_mcp.cli tunnel --port 33041 -i ~/.ssh/dot-mcp-tunnel
+# Equivalent manual command (keep this terminal open):
+ssh -t -i ~/.ssh/dot-mcp-tunnel -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -R 80:localhost:33041 stable@proxy.tunnl.gg
+```
+
+First-time setup is two-phase because the provider chooses the hostname:
+start a local server, run the helper to learn its stable URL, stop the server
+using its normal lifecycle command, set the returned **hostname only**, then
+boot the server with that setting. The tunnel may stay open while restarting
+only the local server. Reusing the SSH key keeps the provider URL; it does not
+make a stale running issuer update itself. A direct server boot example after
+you have provisioned owner credentials using normal CLI setup:
+
+```fish
+set -gx MCP_PUBLIC_HOST your-returned-host.tunnl.gg
+set -gx MCP_PORT 33041
+# Human vault serve reuses the provisioned owner credential, starts foreground,
+# and prompts locally for vault unlock (no secret in arguments):
+.venv/bin/python -m dot_mcp.cli vault serve
+```
+
+If you do not want the vault unlocked, use normal `dots start` for the packaged
+server+tunnel flow; the tunnel-only helper is for an independently managed
+running server, not a replacement lifecycle manager. Do not paste owner/client
+secrets into ChatGPT or include them in URL arguments. `dots credentials` gives
+private credential-file locations; explicit reveal requires a private TTY.
+
+The provider's free browser warning page appears once per day per site. It
+redirects browser GETs before our app; use its normal Continue to site button,
+then continue OAuth. Non-browser clients may skip it according to provider
+policy. dot-mcp does not bypass or treat that warning/cookie as authentication.
+For /live, pass the warning first at the public base URL, then reopen the
+original live link containing its `#token=` fragment. A server cannot receive
+URL fragments, so do not assume an interstitial redirect preserves a live
+capability. /live still requires owner-token entry and exact configured Origin.
+A proxy must support WebSocket upgrades. Our unit tests model proxy headers,
+provider-cookie presence and auth checks; they do not prove any provider's
+future warning implementation or uptime.
+
+The provider currently documents 2 hours inactivity/24 hours maximum lifetime,
+3 tunnels per IP, WebSocket limits and request rate limits. Reconnect with the
+same private key to keep its stable name, within those limits. Changing keys
+changes URLs. TLS ends at the provider; it sees transit traffic. See current
+[tunnl.gg docs](https://tunnl.gg) and
+[stable URL details](https://tunnl.gg/stable-urls.md).
+
+### Tailscale Funnel (account/tailnet required)
+
+With an installed, signed-in Tailscale client and Funnel enabled for your
+tailnet, expose the loopback port:
+
+```fish
+tailscale funnel 33041
+```
+
+Use the printed HTTPS hostname as `MCP_PUBLIC_HOST` before booting dot-mcp,
+and its `/mcp/` URL for the connector. Funnel has HTTPS/MagicDNS/tailnet-policy
+requirements and bandwidth limits; it is not a no-account route. Enabling it
+may change tailnet policy, so the account owner should do setup. Do not expose
+a file directory in place of the authenticated MCP service. Official guide:
+https://tailscale.com/kb/1223/funnel .
+
+### Cloudflare named tunnel (account and domain required)
+
+Use a dashboard-managed named tunnel and published route pointing to
+`http://127.0.0.1:33041`, with your chosen fixed public hostname. Follow the
+current dashboard's install/run steps or install it as a managed service. The
+tunnel token is a credential: don't put it in chat or checked-in scripts.
+Configure `MCP_PUBLIC_HOST` to the fixed hostname before server boot. Keep
+owner-secret/OAuth checks enabled even when adding proxy access controls, and
+ensure any Cloudflare Access policy is compatible with your connector.
+
+Fish-friendly run for an already-configured locally managed named tunnel
+whose credentials/config are kept private:
+
+```fish
+cloudflared tunnel run dot-mcp
+```
+
+Named and dashboard-managed setup differ; don't substitute a Quick Tunnel URL
+for your configured named route. Official setup:
+https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-remote-tunnel/ .
+
+Quick/free tunnels are suitable for short experiments, not reliable connector
+endpoints. In testing, Cloudflare Quick Tunnel intermittently returned Error
+1033 while the process was alive; creating a new random URL forced a connector
+change. Health working for a few minutes did not guarantee the next tool call.
+Official Quick Tunnel docs promise no uptime SLA and note SSE limitations:
+https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/ .

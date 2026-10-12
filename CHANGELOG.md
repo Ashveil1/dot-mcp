@@ -88,3 +88,10 @@
 - Permit only the validated callback HTTPS origin in consent form-action CSP
 - Fix Chromium blocking an otherwise successful OAuth POST redirect
 - Add actual Chromium form-submit/callback regression; retain owner, redirect and PKCE checks
+
+### Stable tunnel helper and proxy checks
+- Add dots tunnel for an already-running loopback server, dedicated stable SSH identity and URL-only stdout
+- Keep provider output in private logs; terminate helper's SSH child on exit
+- Check consent Origin/Referer scheme, host and port without trusting forwarded host headers
+- Test proxy headers/warning cookies cannot bypass OAuth or /live authentication
+- Document fish-friendly stable tunnel routes and /live fragment/interstitial handling

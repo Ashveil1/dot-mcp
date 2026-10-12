@@ -945,16 +945,18 @@ async def _oauth_authorize_req(req):
         return HTMLResponse(page, headers=consent_headers(ruri))
     form = await req.form()
     g = lambda k: str(form.get(k, ""))
-    origin = req.headers.get("origin", "") or req.headers.get("referer", "")
-    if origin:
+    observed = req.headers.get("origin", "") or req.headers.get("referer", "")
+    if observed:
         try:
-            from urllib.parse import urlparse
-            oh = (urlparse(origin).hostname or "").lower()
-            ih = (urlparse(_issuer()).hostname or "").lower()
-            if oh and ih and oh != ih:
+            def _origin(value):
+                parts = urlsplit(value)
+                if parts.scheme not in ("http", "https") or not parts.hostname or parts.username is not None or parts.password is not None:
+                    raise ValueError("invalid origin")
+                return parts.scheme.lower(), parts.hostname.lower(), parts.port or (443 if parts.scheme == "https" else 80)
+            if _origin(observed) != _origin(_issuer()):
                 return JSONResponse({"error": "invalid_request"}, status_code=403)
-        except Exception:
-            pass
+        except ValueError:
+            return JSONResponse({"error": "invalid_request"}, status_code=403)
     st = _oauth_state()
     cl, static = _oauth_find_client(st, g("client_id"))
     ruri = g("redirect_uri")
