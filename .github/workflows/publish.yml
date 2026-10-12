@@ -1,20 +1,9 @@
 name: Publish to PyPI
 
-# Two publishing paths, both guarded:
-#   1. Merge to main that changes pyproject.toml (the release PR merge = approval)
-#   2. Publishing a GitHub Release manually
-# The publish step is skipped when the pyproject version already exists on
-# PyPI, so reruns, releases after a merge, and non-release merges are safe.
-# No API tokens are stored in this repo. PyPI trusted publishing (OIDC) must
-# be configured on the PyPI project first:
-#   PyPI project dot-mcp -> Publishing -> add GitHub publisher
-#   owner: Ashveil1   repository: dot-mcp   workflow: publish.yml
-#   environment: (leave empty unless you create a matching GitHub environment)
-
+# Publish only after an explicitly published GitHub release.
+# Maintainers must wait for the full test matrix before tagging/releasing.
+# Existing PyPI OIDC trusted publishing is unchanged.
 on:
-  push:
-    branches: [main]
-    paths: [pyproject.toml]
   release:
     types: [published]
 

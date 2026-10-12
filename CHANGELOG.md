@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+- Preserve add_update history when set_goal changes or repeats the goal
+- Make file-tool allowed roots, Android /tmp mapping and effective paths explicit; keep root protections
+- Support get_session_status and explicit finished-output purge for legacy run_command sessions
+- Reject negative list_dir limits; expose work-task states and edit modes as schema enums
+- Publish to PyPI only on a published GitHub release, after the full test matrix is green
+
 ## 0.2.1
 - Fix browser OAuth consent failing with Origin: null by using a same-origin referrer policy; keep strict origin checks and suppress cross-origin Referer
 - Accept bare loopback Host headers and the configured public HTTPS host with or without :443; keep DNS-rebinding protection enabled and reject unlisted hosts

@@ -8,6 +8,10 @@ loopback, so there is intentionally NO localhost bypass.
 from __future__ import annotations
 import base64, hashlib, hmac, json, logging, os, secrets, signal, subprocess, tempfile, threading, time, uuid
 from pathlib import Path
+from typing import Literal
+
+WorkTaskState = Literal["pending", "running", "blocked", "done", "failed", "cancelled", "interrupted"]
+WorkTaskFilter = Literal["", "pending", "running", "blocked", "done", "failed", "cancelled", "interrupted"]
 from urllib.parse import unquote, urlencode, urlsplit
 
 HOME = Path(os.environ.get("HOME", str(Path.home()))).resolve()
@@ -51,6 +55,10 @@ def _map_tmp(p: Path) -> Path:
     return p
 
 def resolve(p: str) -> Path:
+    """HOME-relative paths; absolute paths retain their location except Android /tmp mapping.
+
+    Reject paths outside HOME/TMPDIR/shared storage. This is not a shell sandbox.
+    """
     s = os.path.expanduser(p.strip() or ".")
     q = Path(s)
     if not q.is_absolute():
@@ -76,7 +84,7 @@ def resolve(p: str) -> Path:
         except Exception:
             return False
     if not any(_inside(r, a) for a in allowed):
-        raise ValueError(f"path outside allowed roots ({HOME}): {p}")
+        raise ValueError(f"path outside allowed roots HOME={HOME}, TMPDIR={TMPDIR}, shared storage: {p} (resolved to {r}); shell commands are not restricted to these roots")
     return r
 
 def sha256_file(p: Path) -> str:
@@ -315,7 +323,9 @@ except Exception:
 instructions = ("Persistent Termux agent (dot-like): shell + files + memory + goals + tasks. "
     "At chat start use bootstrap_context. For multi-step work create_work_task, "
     "start_command, inspect read_output/status, then update_work_task with a verified "
-    "result or blocker. Relative paths resolve from $HOME. Full shell is not a sandbox.")
+    "result or blocker. Relative paths resolve from $HOME. File tools restrict paths to HOME/TMPDIR/shared storage; "
+    "absolute /tmp paths map to TMPDIR only when TMPDIR is outside /tmp. Returned path "
+    "is the effective path. Shell paths are not remapped or sandboxed.")
 try: srv.instructions = instructions
 except Exception: pass
 
@@ -354,19 +364,26 @@ def read_output(session_id: str, stream: str = "stdout", offset: int = 0, length
 
 @srv.tool()
 def list_dir(path: str = "~", limit: int = 100) -> dict:
-    """List directory."""
+    """List directory. Paths: relative to HOME; absolute allowed-root paths stay absolute.
+    On Android /tmp maps to TMPDIR; shell paths do not. Returns effective path.
+    """
     try:
         limit = int(limit)
     except Exception:
         limit = 100
-    limit = max(1, min(limit, 1000))
+    if limit < 0:
+        raise ValueError("limit must be >= 0")
+    limit = min(limit, 1000)
     d = resolve(path)
     items = [{"name": p.name, "dir": p.is_dir(), "size": p.stat().st_size if p.is_file() else 0} for p in sorted(d.iterdir(), key=lambda x: x.name)[:limit]]
     return {"path": str(d), "items": items}
 
 @srv.tool()
 def read_file(path: str, offset: int = 1, limit: int | None = 200, line_numbers: bool = True) -> dict:
-    """Read UTF-8 text file paginated (1-based lines). Returns sha256 for guarded writes."""
+    """Read UTF-8 text file paginated (1-based lines). Returns sha256 for guarded writes.
+    Paths are HOME-relative or absolute within allowed roots. Android /tmp maps to
+    TMPDIR, unlike shell paths. Returned path is the effective location.
+    """
     p = resolve(path)
     txt = p.read_text(encoding="utf-8", errors="replace").splitlines()
     total = len(txt)
@@ -384,7 +401,10 @@ def read_file(path: str, offset: int = 1, limit: int | None = 200, line_numbers:
 
 @srv.tool()
 def write_file(path: str, content: str, expected_sha256: str | None = None, create_only: bool = False) -> dict:
-    """Atomically create/replace one UTF-8 file (+parents). Guards: expected_sha256 / create_only."""
+    """Atomically create/replace one UTF-8 file (+parents). Guards: expected_sha256 / create_only.
+    Paths are HOME-relative or absolute within allowed roots. Android /tmp maps to
+    TMPDIR, unlike shell paths. Returned path is the effective location.
+    """
     p = resolve(path)
     with _file_lock(p, exclusive=True):
         if create_only and p.exists():
@@ -396,7 +416,10 @@ def write_file(path: str, content: str, expected_sha256: str | None = None, crea
 
 @srv.tool()
 def append_file(path: str, content: str) -> dict:
-    """Append text to file (creates parents). Serialized with other file mutations."""
+    """Append text to file (creates parents). Serialized with other file mutations.
+    Paths are HOME-relative or absolute within allowed roots. Android /tmp maps to
+    TMPDIR, unlike shell paths. Returned path is the effective location.
+    """
     p = resolve(path)
     with _file_lock(p, exclusive=True):
         src = p.read_text(encoding="utf-8") if p.exists() else ""
@@ -404,8 +427,11 @@ def append_file(path: str, content: str) -> dict:
         return {"path": str(p), "sha256": sha256_file(p)}
 
 @srv.tool()
-def edit_file(path: str, match_text: str, write_text: str, mode: str = "replace_match") -> dict:
-    """Single edit: replace_match | insert_before | insert_after. match must be unique."""
+def edit_file(path: str, match_text: str, write_text: str, mode: Literal["replace_match", "insert_before", "insert_after"] = "replace_match") -> dict:
+    """Single edit: replace_match | insert_before | insert_after. match must be unique.
+    Paths are HOME-relative or absolute within allowed roots. Android /tmp maps to
+    TMPDIR, unlike shell paths. Returned path is the effective location.
+    """
     p = resolve(path)
     with _file_lock(p, exclusive=True):
         src = p.read_text(encoding="utf-8")
@@ -455,11 +481,11 @@ def forget(mid: str) -> dict:
 
 @srv.tool()
 def set_goal(goal: str) -> dict:
-    """Set the dot's current responsibility; progress tracked in get_state."""
+    """Set the dot's current responsibility; preserve progress history in get_state."""
     def _set(st):
         if not isinstance(st, dict):
             st = {}
-        st["goal"] = goal; st["updates"] = []; st["updated"] = time.time()
+        st["goal"] = goal; st.setdefault("updates", []); st["updated"] = time.time()
         return st, st
     return mutate_json(STATE_FILE, {}, _set)
 
@@ -579,12 +605,12 @@ def get_work_task(task_id: str) -> dict:
     return _work_store().get_task(task_id)
 
 @srv.tool()
-def list_work_tasks(state: str = "", limit: int = 20) -> dict:
+def list_work_tasks(state: WorkTaskFilter = "", limit: int = 20) -> dict:
     """List durable work; states pending/running/blocked/done/failed/cancelled/interrupted."""
     return _work_store().list_tasks(state, limit)
 
 @srv.tool()
-def update_work_task(task_id: str, state: str, note: str = "", result: str = "", blocker: str = "") -> dict:
+def update_work_task(task_id: str, state: WorkTaskState, note: str = "", result: str = "", blocker: str = "") -> dict:
     """Save a checkpoint/state. Done requires a verified result; blocked needs a question."""
     return _work_store().update_task(task_id, state, note, result, blocker)
 
@@ -597,7 +623,18 @@ def start_command(command: str, cwd: str = "~", timeout: int = 300, task_id: str
 
 @srv.tool()
 def get_session_status(session_id: str) -> dict:
-    """Inspect durable command state. Exit zero does not finish its task automatically."""
+    """Inspect run_command or durable command state. Exit zero does not finish a task."""
+    with SESSIONS_LOCK:
+        legacy = SESSIONS.get(session_id)
+        if legacy is not None:
+            done = bool(legacy.get("done"))
+            state = ("timed_out" if legacy.get("err") else
+                     "completed" if legacy.get("code") == 0 else "failed") if done else "running"
+            return {"session_id": session_id, "state": state, "done": done,
+                    "exit_code": legacy.get("code"), "reason": legacy.get("err", ""),
+                    "command": legacy.get("command", ""), "cwd": legacy.get("cwd", ""),
+                    "stdout_bytes": len(legacy.get("stdout", b"")),
+                    "stderr_bytes": len(legacy.get("stderr", b"")), "durable": False}
     return _work_store().status(session_id)
 
 @srv.tool()
@@ -636,6 +673,15 @@ def ack_work_result(result_id: int) -> dict:
 @srv.tool()
 def purge_session_output(session_id: str) -> dict:
     """Remove reviewed finished output at your explicit choice; keep session/event metadata."""
+    with SESSIONS_LOCK:
+        legacy = SESSIONS.get(session_id)
+        if legacy is not None:
+            if not legacy.get("done"):
+                raise ValueError("cannot purge active output")
+            legacy["stdout"] = b""
+            legacy["stderr"] = b""
+            return {"ok": True, "session_id": session_id,
+                    "note": "output purged; legacy session metadata preserved"}
     return _work_store().purge_output(session_id)
 
 # ---- Optional dedicated local browser and expiring live capabilities ----

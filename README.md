@@ -44,6 +44,13 @@ files are deliberately not trusted.
 `DOT_MCP_STATE_DIR` overrides the complete credential/SSH-key directory
 (default `~/.config/dot-mcp`), not its parent. This is separate from `--data-dir`.
 
+File paths are relative to `$HOME` unless absolute. Absolute paths retain their
+location and must fall within `$HOME`, `$TMPDIR`, or available shared storage;
+other paths are rejected, not silently placed under HOME. On Android, when
+`$TMPDIR` is outside `/tmp`, `/tmp` and `/tmp/...` map to `$TMPDIR`. File tools
+return the effective `path`. Shell command text is never remapped, so use that
+effective path in shell commands when this mapping applies.
+
 File roots are guardrails, not a shell sandbox. A shell credential still grants
 full access as the server's OS user. Use a separate OS user/container for
 untrusted workloads.
@@ -111,8 +118,14 @@ Suggested flow for ChatGPT/Claude:
 `start_command` returns immediately. A reused `idempotency_key` returns the
 same session for an identical request; a changed request with that key is
 rejected. This prevents duplicate launches, not exactly-once external effects.
+`set_goal` changes the current goal without deleting `add_update` history.
+
 The original `run_command` remains the legacy synchronous API. Use the new
-start/status tools for durable asynchronous work; `read_output` handles both.
+start/status tools for durable asynchronous work; `read_output` and
+`get_session_status` handle both. Legacy status is in-memory only and does not
+survive restart. `purge_session_output` clears finished legacy output while
+keeping its metadata; active output cannot be purged. Durable output still
+requires `ack_work_result` before purge.
 
 Default command limits: 4 active sessions, 1 hour maximum runtime, 4 MiB combined
 output per session and 64 MiB saved output before new work is refused. Output
