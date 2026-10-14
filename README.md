@@ -4,6 +4,14 @@ Personal MCP agent for ChatGPT, Claude, and Gemini: shell, files, memory,
 goals, tasks, inbox, scheduler, and self-hosted OAuth — running on your
 own machine.
 
+
+https://github.com/user-attachments/assets/eaa666c6-2d34-44b6-aabb-ae5d2558fca5
+
+
+
+*Demo video (44s), made by the author: ChatGPT using dot-mcp to open a page in a real browser, run code, and remember things across chats. All footage is real screen recording.*
+
+
 > ⚠️ The server gives full shell access to whoever holds a credential.
 > Expose it only while you use it, then stop it (`dot-mcp stop`).
 
