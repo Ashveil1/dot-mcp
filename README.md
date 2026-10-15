@@ -168,7 +168,8 @@ to be tested by the owner.
 `dots start` binds to `127.0.0.1` and does not open a tunnel. Use
 `dots start --remote` for the stable public tunnel, or `--dev` to explicitly
 opt into the unstable development tunnel. Existing remote users must add
-`--remote` after upgrading. Local startup clears stale `MCP_PUBLIC_HOST`.
+`--remote` after upgrading. Local startup clears stale `MCP_PUBLIC_HOST` and stops a surviving tunnel owned
+by this installation. It cannot close tunnels or proxies started separately.
 
 Open `http://127.0.0.1:33041/access` in a private browser and enter the owner
 secret locally. This owner-only page lists client labels, IDs, access scope,

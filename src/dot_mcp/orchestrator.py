@@ -567,6 +567,7 @@ def plain_flow(ctx: StartCtx, state_dir: Path, console, leave_running: bool = Fa
 def _plain_flow(ctx: StartCtx, state_dir: Path, console, leave_running: bool = False) -> FlowResult:
     """Discover stable hostname first, then boot once with correct issuer."""
     if not (ctx.remote or ctx.dev):
+        _kill_tunnel(ctx.repo)  # remove a surviving tunnel owned by an earlier run
         ctx.env.pop("MCP_PUBLIC_HOST", None)
         process = _boot_server(ctx.py, ctx.env, ctx.repo, ctx.repo / "mcp.log")
         if not _wait_health(ctx.port):

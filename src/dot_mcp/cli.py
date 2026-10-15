@@ -145,6 +145,8 @@ def _cmd_start(args: argparse.Namespace) -> int:
             os.environ["MCP_HOST"] = "127.0.0.1"
             try:
                 os.environ.pop("MCP_PUBLIC_HOST", None)
+                if not remote:
+                    ui._kill_tunnel(REPO)
                 if remote:
                     url = (ui._start_dev_tunnel(REPO, port) if dev else
                            ui._start_tunnl(REPO, port, ui._ensure_tunnl_key(STATE_DIR)))

@@ -88,7 +88,10 @@ def test_local_start_never_discovers_tunnel(tmp_path, monkeypatch):
     monkeypatch.setattr(ui,'_start_tunnl',lambda *a:pytest.fail('tunnel not opted in'))
     monkeypatch.setattr(ui,'_start_dev_tunnel',lambda *a:pytest.fail('dev not opted in'))
     monkeypatch.setattr(ui,'_ensure_tunnl_key',lambda *a:pytest.fail('key not needed'))
+    stopped=[]
+    monkeypatch.setattr(ui,'_kill_tunnel',lambda *a:stopped.append(True))
     def boot(py,env,*a):
+        assert stopped == [True]
         assert 'MCP_PUBLIC_HOST' not in env
         return SimpleNamespace(pid=123)
     monkeypatch.setattr(ui,'_boot_server',boot)
