@@ -127,6 +127,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
     port = args.port or DEFAULT_PORT
     data_dir = args.data_dir or DEFAULT_DATA
     dev = getattr(args, "dev", False)
+    remote = getattr(args, "remote", False) or dev
     if dev:
         if not shutil.which("cloudflared"):
             print("not installed: cloudflared", file=sys.stderr)
@@ -139,14 +140,16 @@ def _cmd_start(args: argparse.Namespace) -> int:
             print("No interactive vault prompt in noninteractive/JSON startup; only prior local keyring opt-in can unlock.", file=sys.stderr)
         else:
             from dot_mcp.vault import main as vault_main
-            console.print("Starting stable tunnel and foreground server with a local vault prompt. Ctrl+C stops both.")
+            console.print("Starting foreground server with a local vault prompt. Ctrl+C stops it.")
             os.environ["MCP_PORT"] = str(port)
             os.environ["MCP_HOST"] = "127.0.0.1"
             try:
-                url = (ui._start_dev_tunnel(REPO, port) if dev else
-                       ui._start_tunnl(REPO, port, ui._ensure_tunnl_key(STATE_DIR)))
-                os.environ["MCP_PUBLIC_HOST"] = url.split("://", 1)[1]
-                console.print("Public URL: " + url + "/mcp/")
+                os.environ.pop("MCP_PUBLIC_HOST", None)
+                if remote:
+                    url = (ui._start_dev_tunnel(REPO, port) if dev else
+                           ui._start_tunnl(REPO, port, ui._ensure_tunnl_key(STATE_DIR)))
+                    os.environ["MCP_PUBLIC_HOST"] = url.split("://", 1)[1]
+                    console.print("Public URL: " + url + "/mcp/")
                 return vault_main(["serve", "--data-dir", str(Path(data_dir).resolve())])
             finally:
                 ui._kill_tunnel(REPO)
@@ -165,7 +168,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
         print(f"no mcp package in {py} — run ./setup.sh first", file=sys.stderr)
         return 1
     ctx = ui.StartCtx(port=port, data_dir=data_dir, secret=secret, py=py,
-                      env=env, repo=REPO, dev=dev)
+                      env=env, repo=REPO, dev=dev, remote=remote)
 
     if args.json:
         # script mode: full flow, JSON ONLY to stdout, server left running
@@ -199,8 +202,9 @@ def _cmd_start(args: argparse.Namespace) -> int:
     public_mcp = res.public_url
     oauth = _start_oauth_client(data_dir)
     t = Table("", "", box=box.SIMPLE, show_header=False)
-    t.add_row("Mode", "DEV / UNSTABLE (Cloudflare quick tunnel)" if dev else "Production (tunnl.gg)")
-    t.add_row("Public URL", public_mcp)
+    t.add_row("Mode", "DEV / UNSTABLE (Cloudflare quick tunnel)" if dev else "Remote (tunnl.gg)" if remote else "Local only (no tunnel)")
+    t.add_row("MCP URL", public_mcp)
+    t.add_row("Access controls", f"http://127.0.0.1:{port}/access")
     t.add_row("Browser + vault", "optional installs; vault locked unless local keyring opt-in")
     t.add_row("Owner secret", "hidden (use dots credentials --show locally)")
     t.add_row("OAuth Client ID", oauth.get("client_id", "—"))
@@ -319,7 +323,8 @@ def main(argv: list[str] | None = None) -> int:
         return vault_main(route[1:])
     ap = argparse.ArgumentParser(prog="dot-mcp", description="dot-mcp personal agent CLI")
     sub = ap.add_subparsers(dest="cmd")
-    p = sub.add_parser("start", help="run server + tunnel in background; --vault unlocks a foreground server")
+    p = sub.add_parser("start", help="run local-only server; --remote explicitly opens a tunnel")
+    p.add_argument("--remote", action="store_true", help="opt into remote access via tunnl.gg")
     p.add_argument("--port", type=int, default=0, help="override port (default 33041)")
     p.add_argument("--data-dir", default="", help="override data dir (default ~/.dot-mcp)")
     p.add_argument("--json", action="store_true", help="script mode: JSON result, server left running")

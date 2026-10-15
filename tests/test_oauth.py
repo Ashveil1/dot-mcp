@@ -238,3 +238,31 @@ def test_consent_default_https_port_is_same_origin(oauth, monkeypatch):
     assert approved.status_code == 302
     denied = oauth.post("/authorize", data=fields, headers={"Origin": "null"})
     assert denied.status_code == 403 and denied.json() == {"error": "invalid_request"}
+
+
+def test_readonly_consent_refresh_and_revoke(oauth):
+    from urllib.parse import parse_qs, urlsplit
+    cid = register(oauth)
+    approved = consent(oauth, cid, scope=srv.READ_SCOPE)
+    code = parse_qs(urlsplit(approved.headers['location']).query)['code'][0]
+    token = oauth.post('/token', data={'grant_type':'authorization_code','code':code,
+        'client_id':cid,'redirect_uri':'https://client.test/cb','code_verifier':'v'*43}).json()
+    assert srv._jwt_verify(token['access_token'])['scope']==srv.READ_SCOPE
+    fields={'grant_type':'refresh_token','client_id':cid,'refresh_token':token['refresh_token']}
+    rotated=oauth.post('/token',data=fields).json()
+    assert srv._jwt_verify(rotated['access_token'])['scope']==srv.READ_SCOPE
+    srv._access_revoke(cid)
+    assert not srv._jwt_verify(token['access_token'])
+    assert not srv._jwt_verify(rotated['access_token'])
+    fields['refresh_token']=rotated['refresh_token']
+    assert oauth.post('/token',data=fields).status_code==400
+    assert consent(oauth,cid,scope=srv.OAUTH_SCOPE).status_code==302
+    assert not srv._jwt_verify(rotated['access_token'])
+
+
+def test_invalid_scope_and_managed_client_cannot_escalate(oauth):
+    cid=register(oauth)
+    assert consent(oauth,cid,scope='dots:admin').status_code==400
+    key=srv._access_create('read key',srv.READ_SCOPE)
+    managed=srv._jwt_verify(key)['client_id']
+    assert consent(oauth,managed,scope=srv.OAUTH_SCOPE).status_code==400

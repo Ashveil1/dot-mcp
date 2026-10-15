@@ -12,7 +12,7 @@ https://github.com/user-attachments/assets/eaa666c6-2d34-44b6-aabb-ae5d2558fca5
 *Demo video (44s), made by the author: ChatGPT using dot-mcp to open a page in a real browser, run code, and remember things across chats. All footage is real screen recording.*
 
 
-> ⚠️ The server gives full shell access to whoever holds a credential.
+> ⚠️ The owner secret and full-access credentials give unrestricted shell access. Read-only credentials still expose private files and saved data.
 > Expose it only while you use it, then stop it (`dot-mcp stop`).
 
 ## Install
@@ -26,12 +26,13 @@ Requires Python 3.10+ and OpenSSH (`ssh`, `ssh-keygen`) for the tunnel.
 ## Use
 
 ```bash
-dot-mcp start    # server + public URL (runs in background)
+dot-mcp start           # local-only server, no tunnel (background)
+dot-mcp start --remote  # deliberately expose via a public tunnel
 dot-mcp status   # check if it is running
 dot-mcp stop     # stop server + tunnel
 ```
 
-`dot-mcp start` prints everything the connector needs:
+`dot-mcp start --remote` prints everything the remote connector needs:
 
 ```
 Public URL            https://xxxx.tunnl.gg/mcp/
@@ -68,7 +69,7 @@ Options: `--port` (default 33041), `--data-dir` (default `~/.dot-mcp`),
 
 ### Development tunnel (testing only)
 
-`dots start --dev` uses a Cloudflare quick tunnel instead of the default
+`dots start --dev` uses a Cloudflare quick tunnel instead of the opt-in stable
 stable-key tunnl.gg flow. It needs `cloudflared` on PATH, not OpenSSH. Missing
 `cloudflared` is reported as `not installed: cloudflared`; nothing is installed.
 
@@ -162,6 +163,43 @@ and needs no new model API key for the active-chat workflow. A host may need
 to refresh its tools after an update. Live ChatGPT/Claude integration remains
 to be tested by the owner.
 
+## Client access and revocation
+
+`dots start` binds to `127.0.0.1` and does not open a tunnel. Use
+`dots start --remote` for the stable public tunnel, or `--dev` to explicitly
+opt into the unstable development tunnel. Existing remote users must add
+`--remote` after upgrading. Local startup clears stale `MCP_PUBLIC_HOST`.
+
+Open `http://127.0.0.1:33041/access` in a private browser and enter the owner
+secret locally. This owner-only page lists client labels, IDs, access scope,
+last observed authenticated request, and revoked status. Labels are supplied
+by clients, not verified identities; last-seen activity is not proof of an
+active connection. Use **Revoke client** to block its next request/tool call,
+refresh token and pending authorization codes. Reapproval does not restore old
+tokens. It does not stop a command already running or erase copied data.
+The owner secret is not an individually revocable client: rotate it locally.
+
+The same page creates separate named `dots:read` or `dots:full` bearer
+credentials, valid for 30 days and individually revocable. Copy credentials
+into the client's auth settings, never into chat. OAuth consent defaults to
+read-only; deliberately select full access for shell/browser work. Reauthorizing
+a client replaces its prior grant and invalidates its old tokens. Existing
+unexpired OAuth grants retain their prior full scope until revoked/reapproved.
+
+| Access | Tools / impact |
+| --- | --- |
+| Read-only | `list_dir`, `read_file`, `read_output`, `recall`, `get_state`, `poll_inbox`, `list_schedules`, `get_work_task`, `list_work_tasks`, `get_session_status`, `bootstrap_context`, `open_workspace` |
+| Full only | Shell execution/cancellation, file writes/edits, memory/task/inbox changes, schedules, artifact registration, browser tools, vault tools and authenticated live browser control |
+| Owner only | Consent, creating credentials and revoking clients on `/access` |
+
+Read-only is a tool allowlist, not shell-command filtering. Newly added tools
+are denied to read-only unless explicitly listed. It is **not data isolation**:
+files, command output and saved context may contain secrets. Password-free live
+view links, if explicitly enabled, remain a separate disclosure route. Full
+access is not sandboxed and can change the server and its credential files.
+The access page retains the owner secret in hidden form fields while open;
+it uses no-store responses and no third-party assets. Close it when finished.
+
 ## Security model
 
 - `/mcp/` requires `Authorization: Bearer` (OAuth JWT or owner secret) —
@@ -174,7 +212,7 @@ to be tested by the owner.
 - Known limits: the tunnel provider sees traffic (TLS ends at their edge);
   back up `~/.dot-mcp` yourself
 
-## Local-only mode (no tunnel)
+## Local chat loop (no HTTP server or tunnel)
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -465,7 +503,7 @@ set -gx MCP_PORT 33041
 .venv/bin/python -m dot_mcp.cli vault serve
 ```
 
-If you do not want the vault unlocked, use normal `dots start` for the packaged
+If you do not want the vault unlocked, use normal `dots start --remote` for the packaged
 server+tunnel flow; the tunnel-only helper is for an independently managed
 running server, not a replacement lifecycle manager. Do not paste owner/client
 secrets into ChatGPT or include them in URL arguments. `dots credentials` gives
@@ -547,7 +585,7 @@ packages are still required. The binary is reused, **not** your main browser
 profile or already-open tabs; dot-mcp retains its own profile and sandbox.
 
 Vault tools are present by default; encryption still needs an initialized local
-vault. `dots start` now opens the stable-key tunnl.gg tunnel first, discovers its
+vault. `dots start --remote` opens the stable-key tunnl.gg tunnel first, discovers its
 hostname, sets `MCP_PUBLIC_HOST` for the server and boots it once. No manually
 exported hostname or second tunnel terminal is required. The dedicated key and
 known-hosts file live in the local state directory. Keep that key to retain the
@@ -560,7 +598,7 @@ For a manual local passphrase prompt and foreground lifetime:
 .venv/bin/python -m dot_mcp.cli start --vault
 ```
 
-This starts its own tunnel. Keep the terminal open; Ctrl+C stops both. In
+Add `--remote` to start a tunnel; without it the server stays local. Keep the terminal open; Ctrl+C stops both. In
 noninteractive or JSON mode there is no prompt. A prior keyring opt-in may still
 unlock the detached server. Without opt-in/keyring, the vault remains locked.
 

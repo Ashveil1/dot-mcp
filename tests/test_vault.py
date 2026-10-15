@@ -119,7 +119,7 @@ def test_start_vault_actual_local_unlock_without_child(tmp_path,monkeypatch):
         assert os.environ['DOT_MCP_DATA']==str(tmp_path.resolve())
         assert os.environ['MCP_PORT']=='33044'
         assert os.environ['MCP_HOST']=='127.0.0.1'
-        assert os.environ['MCP_PUBLIC_HOST']=='fixture.tunnl.gg'
+        assert 'MCP_PUBLIC_HOST' not in os.environ
         assert os.environ['MCP_PATH_SECRET']=='owner-fixture-only'
         assert PASSPHRASE not in os.environ.values()
     monkeypatch.setattr('runpy.run_module',foreground)

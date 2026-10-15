@@ -143,6 +143,8 @@ def test_add_schedule_enforces_minimum():
 
 def test_jwt_roundtrip_and_tamper():
     st = srv._oauth_ensure()
+    st["clients"]["c-1"] = {"name": "fixture"}
+    srv._oauth_save(st)
     tok = srv._jwt_issue(st["as_secret"], "c-1", "dots:full", ttl=60)
     assert srv._jwt_verify(tok) is not None
     h, p, s = tok.split(".")
@@ -153,6 +155,8 @@ def test_jwt_roundtrip_and_tamper():
 
 def test_jwt_wrong_audience_rejected():
     st = srv._oauth_ensure()
+    st["clients"]["c-1"] = {"name": "fixture"}
+    srv._oauth_save(st)
     tok = srv._jwt_issue(st["as_secret"], "c-1", "dots:full", ttl=60)
     h, p, s = tok.split(".")
     claims = json.loads(base64.urlsafe_b64decode(p + "=="))

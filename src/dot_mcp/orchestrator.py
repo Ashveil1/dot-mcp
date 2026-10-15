@@ -140,6 +140,7 @@ class StartCtx:
     env: dict
     repo: Path
     dev: bool = False
+    remote: bool = False
 
 
 @dataclass
@@ -565,6 +566,17 @@ def plain_flow(ctx: StartCtx, state_dir: Path, console, leave_running: bool = Fa
 
 def _plain_flow(ctx: StartCtx, state_dir: Path, console, leave_running: bool = False) -> FlowResult:
     """Discover stable hostname first, then boot once with correct issuer."""
+    if not (ctx.remote or ctx.dev):
+        ctx.env.pop("MCP_PUBLIC_HOST", None)
+        process = _boot_server(ctx.py, ctx.env, ctx.repo, ctx.repo / "mcp.log")
+        if not _wait_health(ctx.port):
+            _kill_proc(process)
+            return FlowResult(False, reason="health")
+        url = f"http://127.0.0.1:{ctx.port}/mcp/"
+        if not leave_running:
+            _kill_proc(process)
+            _wait_port_free(ctx.port)
+        return FlowResult(True, public_url=url, host=f"127.0.0.1:{ctx.port}", server_proc=process)
     if ctx.dev:
         console.print("DEV / UNSTABLE: opening Cloudflare quick tunnel (testing only)...")
         url = _start_dev_tunnel(ctx.repo, ctx.port)
@@ -592,13 +604,13 @@ def _plain_flow(ctx: StartCtx, state_dir: Path, console, leave_running: bool = F
 def json_result(ok: bool, ctx: StartCtx, res: FlowResult, oauth: dict) -> str:
     return json.dumps({
         "ok": ok,
-        "public_url": res.public_url if ok else "",
+        "public_url": res.public_url if ok and (ctx.remote or ctx.dev) else "",
         "local": f"http://127.0.0.1:{ctx.port}/mcp/",
-        "issuer": f"https://{res.host}" if ok else "",
+        "issuer": (("https://" if ctx.remote or ctx.dev else "http://") + res.host) if ok else "",
         "client_id": oauth.get("client_id", ""),
         "credentials_hidden": True,
-        "mode": "dev" if ctx.dev else "production",
-        "tunnel_provider": "cloudflare-quick" if ctx.dev else "tunnl.gg",
+        "mode": "dev" if ctx.dev else "remote" if ctx.remote else "local",
+        "tunnel_provider": "cloudflare-quick" if ctx.dev else "tunnl.gg" if ctx.remote else None,
         "unstable": ctx.dev,
         "port": ctx.port,
         "reason": res.reason,
