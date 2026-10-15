@@ -44,7 +44,7 @@ def test_dev_flow_sets_discovered_host_before_one_boot(tmp_path, monkeypatch):
     assert output['tunnel_provider'] == 'cloudflare-quick'
     assert output['issuer'] == 'https://fixture.trycloudflare.com'
     ctx.dev = False
-    assert json.loads(ui.json_result(True, ctx, result, {}))['mode'] == 'production'
+    assert json.loads(ui.json_result(True, ctx, result, {}))['mode'] == 'local'
 
 
 def test_missing_cloudflared_before_secrets_or_install(tmp_path, monkeypatch, capsys):

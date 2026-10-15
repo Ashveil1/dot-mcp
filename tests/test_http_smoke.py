@@ -55,6 +55,40 @@ def test_production_app_auth_and_mcp_initialize(tmp_path):
             with urlopen(request, timeout=3) as response:
                 assert response.status == 200
                 assert b'"jsonrpc"' in response.read()
+        # Exercise the production HTTP middleware and SDK dispatch, not just helpers.
+        from urllib.parse import urlencode
+        import re
+        def manage(**fields):
+            req = Request(base + '/access', method='POST',
+                data=urlencode({'owner_secret':'isolated-test-secret', **fields}).encode())
+            with urlopen(req, timeout=3) as response:
+                return response.read().decode()
+        page = manage(action='create', name='smoke-read', scope='dots:read')
+        key = re.search(r'<textarea[^>]*>([^<]+)</textarea>', page)[1]
+        def rpc(name, arguments):
+            req = Request(base + '/mcp/', method='POST', headers={
+                'Authorization':'Bearer ' + key, 'Content-Type':'application/json',
+                'Accept':'application/json, text/event-stream'}, data=json.dumps({
+                'jsonrpc':'2.0','id':2,'method':'tools/call',
+                'params':{'name':name,'arguments':arguments}}).encode())
+            with urlopen(req, timeout=3) as response:
+                return response.read().decode()
+        allowed = rpc('list_dir', {})
+        assert '"isError":true' not in allowed and 'forbidden' not in allowed
+        denied = rpc('write_file', {'path':'MUST-NOT-EXIST','content':'denied'})
+        assert 'forbidden' in denied
+        assert not (tmp_path / 'MUST-NOT-EXIST').exists()
+        assert 'forbidden' in rpc('run_command', {'command':'echo forbidden'})
+        claims = json.loads(__import__('base64').urlsafe_b64decode(key.split('.')[1] + '==='))
+        clients = manage()
+        assert 'smoke-read' in clients and 'Last request:' in clients
+        manage(action='revoke', client_id=claims['client_id'])
+        try:
+            rpc('list_dir', {})
+        except HTTPError as error:
+            assert error.code == 401
+        else:
+            raise AssertionError('revoked credential still accepted')
         for host in ("evil.test", "stale.tunnl.gg", "fixture.tunnl.gg:444"):
             request.add_header("Host", host)
             try:

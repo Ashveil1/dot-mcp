@@ -6,7 +6,7 @@ from dot_mcp import orchestrator as ui
 @pytest.fixture
 def flow(tmp_path,monkeypatch):
     calls=[]
-    ctx=ui.StartCtx(33041,str(tmp_path),'fixture','python',{'MCP_PUBLIC_HOST':'stale.test'},tmp_path)
+    ctx=ui.StartCtx(33041,str(tmp_path),'fixture','python',{'MCP_PUBLIC_HOST':'stale.test'},tmp_path,remote=True)
     monkeypatch.setattr(ui,'_ensure_tunnl_key',lambda *a:tmp_path/'key')
     def tunnel(*a):calls.append('tunnel');return 'https://fixture-abc.tunnl.gg'
     monkeypatch.setattr(ui,'_start_tunnl',tunnel)

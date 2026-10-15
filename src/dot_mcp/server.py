@@ -9,6 +9,12 @@ from __future__ import annotations
 import base64, hashlib, hmac, json, logging, os, secrets, signal, subprocess, tempfile, threading, time, uuid
 from pathlib import Path
 from typing import Literal
+from contextvars import ContextVar
+
+_ACCESS = ContextVar("dot_mcp_access", default=None)
+READ_TOOLS = frozenset({"list_dir", "read_file", "read_output", "recall", "get_state",
+    "poll_inbox", "list_schedules", "get_work_task", "list_work_tasks",
+    "get_session_status", "bootstrap_context", "open_workspace"})
 
 WorkTaskState = Literal["pending", "running", "blocked", "done", "failed", "cancelled", "interrupted"]
 WorkTaskFilter = Literal["", "pending", "running", "blocked", "done", "failed", "cancelled", "interrupted"]
@@ -328,6 +334,11 @@ from pydantic import ValidationError
 # Retain SDK validation; its raw text is never forwarded (it can echo inputs).
 _original_call_tool = srv.call_tool
 async def _safe_call_tool(name, arguments, *args, **kwargs):
+    identity = _ACCESS.get()
+    if identity is not None:
+        claims = _credential(identity["token"])
+        if not claims or (claims["scope"] != OAUTH_SCOPE and name not in READ_TOOLS):
+            raise SafeToolError("forbidden", "credential revoked or tool requires full access")
     tool = srv._tool_manager.get_tool(name)
     if tool is None:
         raise SafeToolError("not_found", "unknown tool", "tool")
@@ -867,6 +878,7 @@ def vault_lock() -> dict:
 # (no Bearer header) keeps working for local scripts.
 OAUTH_FILE = DATA_DIR / "oauth.json"
 OAUTH_SCOPE = "dots:full"
+READ_SCOPE = "dots:read"
 
 def _oauth_state() -> dict:
     st = load_json(OAUTH_FILE, {})
@@ -942,12 +954,93 @@ def _b64u(b: bytes) -> str:
 def _b64u_dec(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
+def _client_version(cid):
+    client, _ = _oauth_find_client(_oauth_state(), cid)
+    return client.get("version", 0) if client else 0
+
+
+def _credential(token):
+    if token and hmac.compare_digest(token, SECRET):
+        return {"client_id": "owner", "scope": OAUTH_SCOPE}
+    return _jwt_verify(token) if token else None
+
+
+def _full_credential(token):
+    claims = _credential(token)
+    return bool(claims and claims["scope"] == OAUTH_SCOPE)
+
+
+def _access_clients():
+    st = _oauth_state()
+    clients = dict(st.get("clients", {}))
+    sc = st.get("static_client")
+    if sc:
+        clients[sc["client_id"]] = sc
+    return [{"client_id": cid, "name": rec.get("name") or cid,
+             "scope": rec.get("scope", "legacy full access"),
+             "last_seen": rec.get("last_seen"), "revoked": bool(rec.get("revoked"))}
+            for cid, rec in clients.items()]
+
+
+def _access_revoke(cid):
+    def change(st):
+        client, _ = _oauth_find_client(st, cid)
+        if not client:
+            raise ValueError("unknown client")
+        client["version"] = client.get("version", 0) + 1
+        client["revoked"] = True
+        for kind in ("codes", "refresh"):
+            st[kind] = {k: v for k, v in st.get(kind, {}).items() if v.get("client_id") != cid}
+        return st, None
+    mutate_json(OAUTH_FILE, {}, change)
+
+
+def _access_create(name, scope):
+    if scope not in (READ_SCOPE, OAUTH_SCOPE) or not name.strip():
+        raise ValueError("name and valid scope required")
+    _oauth_ensure()
+    cid = "key-" + uuid.uuid4().hex[:12]
+    def change(st):
+        st.setdefault("clients", {})[cid] = {"name": name[:80], "scope": scope,
+            "created": time.time(), "redirect_uris": [], "managed": True}
+        return st, st["as_secret"]
+    signing = mutate_json(OAUTH_FILE, {}, change)
+    return _jwt_issue(signing, cid, scope, ttl=30 * 86400)
+
+
+async def _access_req(req):
+    from starlette.responses import HTMLResponse, JSONResponse
+    from dot_mcp.web_ui import access_page, HEADERS
+    if req.method == "GET":
+        return HTMLResponse(access_page(), headers=HEADERS)
+    form = await req.form()
+    owner = str(form.get("owner_secret", ""))
+    # Never accept ordinary full-access client tokens for owner management.
+    if not hmac.compare_digest(owner, SECRET):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    origin = req.headers.get("origin")
+    if origin and origin.rstrip("/") != _issuer():
+        return JSONResponse({"error": "invalid_origin"}, status_code=403)
+    token = ""
+    try:
+        action = form.get("action", "list")
+        if action == "revoke":
+            _access_revoke(str(form.get("client_id", "")))
+        elif action == "create":
+            token = _access_create(str(form.get("name", "")), str(form.get("scope", READ_SCOPE)))
+        elif action != "list":
+            raise ValueError("invalid action")
+    except ValueError:
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+    return HTMLResponse(access_page(_access_clients(), owner, token), headers=HEADERS)
+
+
 def _jwt_issue(secret: str, client_id: str, scope: str, ttl: int = 3600) -> str:
     now = int(time.time())
     h = _b64u(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
     p = _b64u(json.dumps({"iss": _issuer(), "aud": _resource_id(), "sub": "owner",
         "client_id": client_id, "scope": scope, "iat": now, "exp": now + ttl,
-        "jti": uuid.uuid4().hex[:12]}, separators=(",", ":")).encode())
+        "ver": _client_version(client_id), "jti": uuid.uuid4().hex[:12]}, separators=(",", ":")).encode())
     s = _b64u(hmac.new(secret.encode(), f"{h}.{p}".encode(), hashlib.sha256).digest())
     return f"{h}.{p}.{s}"
 
@@ -963,7 +1056,10 @@ def _jwt_verify(token: str) -> dict | None:
             return None
         if claims.get("iss") != _issuer() or claims.get("aud") != _resource_id():
             return None
-        if OAUTH_SCOPE not in (claims.get("scope") or "").split():
+        client, _ = _oauth_find_client(st, claims.get("client_id", ""))
+        if not client or client.get("revoked") or claims.get("ver", 0) != client.get("version", 0):
+            return None
+        if claims.get("scope") not in (OAUTH_SCOPE, READ_SCOPE):
             return None
         return claims
     except Exception:
@@ -980,14 +1076,14 @@ def _oauth_metadata() -> dict:
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post"],
-        "scopes_supported": [OAUTH_SCOPE],
+        "scopes_supported": [READ_SCOPE, OAUTH_SCOPE],
     }
 
 def _oauth_protected_resource() -> dict:
     return {
         "resource": _resource_id(),
         "authorization_servers": [_issuer()],
-        "scopes_supported": [OAUTH_SCOPE],
+        "scopes_supported": [READ_SCOPE, OAUTH_SCOPE],
         "bearer_methods_supported": ["header"],
     }
 
@@ -1055,7 +1151,7 @@ async def _oauth_authorize_req(req):
         ruri = q.get("redirect_uri", "")
         ok_uri = ((_valid_redirect(ruri) and urlsplit(ruri).scheme == "https") if static
                   else bool(cl and ruri in cl.get("redirect_uris", [])))
-        if not cl or not ok_uri:
+        if not cl or cl.get("managed") or not ok_uri:
             return JSONResponse({"error": "invalid_request",
                 "hint": "unknown client or redirect_uri — POST /register first"}, status_code=400)
         if q.get("response_type") != "code":
@@ -1064,9 +1160,11 @@ async def _oauth_authorize_req(req):
                 q.get("code_challenge", ""), q.get("code_challenge_method", "")):
             return JSONResponse({"error": "invalid_request",
                 "hint": "PKCE S256 code_challenge required for dynamic clients"}, status_code=400)
-        scope = q.get("scope", OAUTH_SCOPE)
+        scope = q.get("scope", READ_SCOPE)
+        if scope not in (READ_SCOPE, OAUTH_SCOPE):
+            return JSONResponse({"error": "invalid_scope"}, status_code=400)
         hidden = "".join(f'<input type="hidden" name="{k}" value="{_html.escape(q.get(k, ""))}">'
-            for k in ("client_id", "redirect_uri", "code_challenge", "code_challenge_method", "scope", "state", "resource"))
+            for k in ("client_id", "redirect_uri", "code_challenge", "code_challenge_method", "state", "resource"))
         from dot_mcp.web_ui import authorize, consent_headers
         page = authorize(str(cl.get("name") or q.get("client_id", "")), str(scope), hidden)
         return HTMLResponse(page, headers=consent_headers(ruri))
@@ -1089,7 +1187,7 @@ async def _oauth_authorize_req(req):
     ruri = g("redirect_uri")
     ok_uri = ((_valid_redirect(ruri) and urlsplit(ruri).scheme == "https") if static
               else bool(cl and ruri in (cl.get("redirect_uris", []) if cl else [])))
-    if not cl or not ok_uri:
+    if not cl or cl.get("managed") or not ok_uri:
         return JSONResponse({"error": "invalid_request"}, status_code=400)
     # POST can be called directly, so enforce the same PKCE gate as GET.
     if (not static or g("code_challenge")) and not _valid_pkce(
@@ -1097,16 +1195,25 @@ async def _oauth_authorize_req(req):
         return JSONResponse({"error": "invalid_request"}, status_code=400)
     if not hmac.compare_digest(g("owner_secret").strip(), SECRET):
         return HTMLResponse("<h3>Wrong owner secret.</h3>", status_code=403)
+    scope = g("scope") or READ_SCOPE
+    if scope not in (READ_SCOPE, OAUTH_SCOPE):
+        return JSONResponse({"error": "invalid_scope"}, status_code=400)
     code = secrets.token_urlsafe(32)
     now = time.time()
     def _addcode(st):
         if not isinstance(st, dict):
             st = {}
+        client, _ = _oauth_find_client(st, g("client_id"))
+        client["version"] = client.get("version", 0) + 1
+        client["revoked"] = False
+        client["scope"] = scope
+        for kind in ("codes", "refresh"):
+            st[kind] = {k: v for k, v in st.get(kind, {}).items() if v.get("client_id") != g("client_id")}
         codes = st.setdefault("codes", {})
         for k in [k for k, v in codes.items() if v.get("exp", 0) <= now]:
             codes.pop(k, None)
         codes[code] = {"client_id": g("client_id"), "redirect_uri": g("redirect_uri"),
-            "challenge": g("code_challenge"), "scope": g("scope") or OAUTH_SCOPE, "exp": now + 600}
+            "challenge": g("code_challenge"), "scope": scope, "exp": now + 600}
         return st, None
     mutate_json(OAUTH_FILE, {}, _addcode)
     _oauth_chmod()
@@ -1145,7 +1252,7 @@ async def _oauth_token_req(req):
         if not client_id or client_id != cid:
             return None
         rec, static = _oauth_find_client(st, cid)
-        if not rec:
+        if not rec or rec.get("revoked") or rec.get("managed"):
             return None
         if not static:
             return "public"  # DCR public client: PKCE is the credential
@@ -1345,11 +1452,12 @@ if __name__ == "__main__":
         Route("/register", _oauth_register_req, methods=["POST"]),
         Route("/authorize", _oauth_authorize_req, methods=["GET", "POST"]),
         Route("/token", _oauth_token_req, methods=["POST"]),
+        Route("/access", _access_req, methods=["GET", "POST"]),
     ):
         try: app.routes.append(_route)
         except Exception: pass
     from dot_mcp.live import routes as live_routes
-    app.routes.extend(live_routes(_browser, _issuer, lambda token: bool(token) and (hmac.compare_digest(token, SECRET) or _jwt_verify(token))))
+    app.routes.extend(live_routes(_browser, _issuer, _full_credential))
     from starlette.middleware.base import BaseHTTPMiddleware
     class OAuthBearer(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
@@ -1370,19 +1478,30 @@ if __name__ == "__main__":
                         pass
                 got = request.headers.get("authorization", "")
                 token = got[7:].strip() if got.lower().startswith("bearer ") else ""
-                ok = bool(token) and hmac.compare_digest(token, SECRET)
-                if not ok and not (token and _jwt_verify(token)):
+                claims = _credential(token)
+                if not claims:
                     _audit(ip, request.method, path, 401, tool, int((time.time() - t0) * 1000))
                     return JSONResponse({"error": "unauthorized"}, status_code=401)
-            elif path in ("/authorize", "/token", "/register") and request.method == "POST":
+                request.state.access = {**claims, "token": token}
+                cid = claims["client_id"]
+                if cid != "owner":
+                    def seen(st):
+                        client, _ = _oauth_find_client(st, cid)
+                        if client: client["last_seen"] = time.time()
+                        return st, None
+                    mutate_json(OAUTH_FILE, {}, seen)
+            elif path in ("/access", "/authorize", "/token", "/register") and request.method == "POST":
                 if not _rate_ok("auth", ip, RATE_AUTH_PER_MIN):
                     _audit(ip, request.method, path, 429, "", 0)
                     return JSONResponse({"error": "rate_limited"}, status_code=429)
+            context_token = _ACCESS.set(getattr(request.state, "access", None))
             try:
                 resp = await call_next(request)
             except Exception:
                 _audit(ip, request.method, path, 500, tool, int((time.time() - t0) * 1000))
                 raise
+            finally:
+                _ACCESS.reset(context_token)
             _audit(ip, request.method, path, resp.status_code, tool, int((time.time() - t0) * 1000))
             return resp
     OAuthBearer.__name__ = "OAuthBearer"

@@ -1,3 +1,10 @@
+# Unreleased
+
+- Local-only startup by default; public tunnels now require `--remote` or `--dev`.
+- Separate read-only/full client credentials, safe-default OAuth consent, owner access page with client activity and immediate next-call revoke.
+- Read-only deny-by-default dispatch and full-only authenticated live browser access.
+- Document scope boundaries and revocation limits; test real HTTP denial after revoke.
+
 # Changelog
 
 ## Unreleased
